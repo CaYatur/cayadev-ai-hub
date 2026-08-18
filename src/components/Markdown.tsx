@@ -24,6 +24,27 @@ const EXECUTABLE = new Set([
 const PATH_SHAPED =
   /^(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?(?:[\w .@+-]+[\\/])*[\w .@+-]+\.[A-Za-z]\w{0,9}$/;
 
+/// Extensions worth turning into a link when the string has no separator.
+///
+/// Shape alone is not enough: `array.map`, `Object.keys` and `str.trim` all
+/// look exactly like `notes.txt` to the pattern above, and a bare `README.md`
+/// is far commoner in prose than a bare method call is rare. So a string with
+/// no slash in it has to end in something that is actually a file.
+const FILE_EXTENSIONS = new Set([
+  "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "rb", "php", "c",
+  "h", "cpp", "hpp", "cs", "swift", "sh", "bash", "ps1", "sql", "css", "scss",
+  "html", "xml", "json", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+  "md", "mdx", "txt", "csv", "tsv", "log", "lock", "gitignore", "dockerfile",
+  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "pdf", "docx",
+  "xlsx", "pptx", "zip", "tar", "gz", "mp3", "wav", "mp4", "mov",
+]);
+
+function looksLikeAPath(text: string): boolean {
+  if (text.length > 200 || !PATH_SHAPED.test(text)) return false;
+  if (/[\\/]/.test(text)) return true;
+  return FILE_EXTENSIONS.has(extensionOf(text));
+}
+
 function extensionOf(path: string): string {
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
@@ -100,7 +121,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
 /// that is the reference the user most wants to follow.
 function InlineCode({ children }: { children?: ReactNode }) {
   const text = typeof children === "string" ? children : null;
-  if (text && text.length < 200 && PATH_SHAPED.test(text)) {
+  if (text && looksLikeAPath(text)) {
     return (
       <button className="md-inline-path" onClick={() => reveal(text)} title={text}>
         {text}

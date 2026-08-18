@@ -365,6 +365,7 @@ export default function Chat({
   attachments,
   dropping,
   liveTokens,
+  runTokens,
   runStartedAt,
   onPaste,
   onDetach,
@@ -400,6 +401,7 @@ export default function Chat({
   /// Counted client-side while tokens stream, so the status line moves
   /// during a step instead of only between them.
   liveTokens: number;
+  runTokens: number;
   runStartedAt: number | null;
   onPaste: (file: File) => void;
   onDetach: (path: string) => void;
@@ -447,13 +449,13 @@ export default function Chat({
   if (runStartedAt === null) {
     firstTokenAt.current = null;
     tokensAtStart.current = 0;
-  } else if (firstTokenAt.current === null && liveTokens > 0) {
+  } else if (firstTokenAt.current === null && runTokens > 0) {
     firstTokenAt.current = Date.now();
-    tokensAtStart.current = liveTokens;
+    tokensAtStart.current = runTokens;
   }
   const sinceFirst = firstTokenAt.current ? (Date.now() - firstTokenAt.current) / 1000 : 0;
   const liveRate =
-    sinceFirst > 0.6 ? (liveTokens - tokensAtStart.current) / sinceFirst : null;
+    sinceFirst > 0.6 ? (runTokens - tokensAtStart.current) / sinceFirst : null;
   // While a run is in flight the live figure is the true one; between runs the
   // daemon's own count from the last step is more accurate than our estimate.
   const rate = liveRate ?? session.lastRate;

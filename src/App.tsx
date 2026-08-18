@@ -59,7 +59,14 @@ export default function App() {
   const [dropping, setDropping] = useState(false);
   // Metrics only arrive when a step finishes, so a long step left the
   // status line frozen. These are counted client-side as tokens stream.
+  //
+  // Two counters, because they answer different questions. `liveTokens` is
+  // what has streamed since the last completed step — the daemon's own numbers
+  // already cover everything before that, and adding both would count each
+  // step's output twice. `runTokens` is the whole run, which is what a rate
+  // needs: resetting it every step would make the rate jump about.
   const [liveTokens, setLiveTokens] = useState(0);
+  const [runTokens, setRunTokens] = useState(0);
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
 
   // The event stream is global, so handlers need the current session id without
@@ -119,7 +126,11 @@ export default function App() {
             // Rough, and deliberately so: an exact count needs the model's
             // tokenizer and a round-trip. ~3.6 chars/token is close enough for
             // a number that changes several times a second.
-            setLiveTokens((n) => n + Math.max(1, Math.round(event.text.length / 3.6)));
+            {
+              const estimate = Math.max(1, Math.round(event.text.length / 3.6));
+              setLiveTokens((n) => n + estimate);
+              setRunTokens((n) => n + estimate);
+            }
             patch(id, (s) => {
               const entries = [...s.entries];
               const last = entries[entries.length - 1];
@@ -181,6 +192,9 @@ export default function App() {
 
           case "step_done":
             patch(id, (s) => applyMetrics(s, event.metrics));
+            // The daemon has now reported this step exactly; the estimate that
+            // stood in for it while it streamed would otherwise be added twice.
+            setLiveTokens(0);
             break;
 
           case "error":
@@ -318,6 +332,7 @@ export default function App() {
       setRunning(true);
       setRunStartedAt(Date.now());
       setLiveTokens(0);
+      setRunTokens(0);
       try {
         await api.run(
           text,
@@ -333,6 +348,7 @@ export default function App() {
         setRunning(false);
         setRunStartedAt(null);
         setLiveTokens(0);
+        setRunTokens(0);
         setPending(null);
         setQuestion(null);
       }
@@ -545,6 +561,7 @@ export default function App() {
             onNumCtx={setNumCtx}
             attachments={attachments}
             liveTokens={liveTokens}
+            runTokens={runTokens}
             runStartedAt={runStartedAt}
             onPaste={attachPasted}
             dropping={dropping}

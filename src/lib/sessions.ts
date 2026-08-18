@@ -201,9 +201,18 @@ export function historyFrom(entries: Entry[]): Turn[] {
 
   for (const entry of entries) {
     switch (entry.kind) {
-      case "user":
-        turns.push({ role: "user", text: entry.text });
+      case "user": {
+        // An image travels inside its own message and cannot be replayed, so
+        // the replay says one was there. Without this a follow-up — "peki bu
+        // görselde ne yazıyor?" — reaches the model as a question about a
+        // picture it has no reason to think ever existed.
+        const files = (entry.attachments ?? []).map((a) => `[attached ${a.name}]`);
+        turns.push({
+          role: "user",
+          text: files.length > 0 ? `${entry.text}\n${files.join(" ")}` : entry.text,
+        });
         break;
+      }
       case "assistant":
         if (entry.text.trim()) intoAssistant(entry.text.trim());
         break;
