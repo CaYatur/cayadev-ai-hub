@@ -10,11 +10,22 @@ everything else is not built yet, however well specified it looks.
 - Streaming chat with **idle-based timeouts** — a first-token budget covering
   model load and prefill, and a separate inter-token budget — rather than a
   total-request timeout that kills a legitimately slow prefill
+- **Budgets sized to the model, in work rather than time.** Some templates send
+  a whole tool call in one piece: `qwen3.8:27b` streams its reasoning, then goes
+  silent for **547 seconds** while it writes a file, and a fixed budget read
+  that as a stall. The budget is now the time to produce four thousand tokens at
+  whatever rate this model manages — measured after the first step, estimated
+  from placement before it
+- A **heartbeat during silence**, so a model loading or writing says so instead
+  of looking hung
 - Cancellation that reaches an in-flight stream, not only the gaps between steps
 - Model registry: capability detection, true context limits from GGUF metadata,
   and VRAM fit estimation that accounts for hybrid attention
 - **GPU memory read from `nvidia-smi`**, not assumed
 - Task-based routing derived from installed models, ranking placement above size
+  — except for vision, which takes the *smallest* well-placed model: reading a
+  screenshot is a bounded job, and ranking by size picked the 17.7 GB model once
+  nothing fit, at 249 s a picture against 16 s
 
 ### Agent loop — `src-tauri/src/agent/`
 - **Tolerant tool-call extraction**: native field, `<tool_call>` tags, fenced
@@ -66,7 +77,12 @@ everything else is not built yet, however well specified it looks.
 - **Attached images ride in the message**, on a model that can see them — the
   run is handed to one if the chosen model cannot, and carries no tool field at
   all for the vision models that cannot call tools
-- Screen capture of this machine, and ADB: devices, screen, UI hierarchy, logcat
+- A model that can see reads its own screenshots; routing elsewhere is only for
+  models that cannot see at all. Reasoning is turned off for the describing
+  call, because a thinking model spent its whole reply budget on it and returned
+  nothing
+- Screen capture of **every monitor**, scaled to 1920px before it is sent, and
+  ADB: devices, screen, UI hierarchy, logcat
 - **`ask_user`**: a question to the user mid-run, with choices or a written
   answer, riding the approval channel's shape but its own map
 - Every tool hides itself when its dependency is missing
@@ -95,6 +111,8 @@ everything else is not built yet, however well specified it looks.
   model load is not averaged into the rate
 - Following the newest output, and stopping the moment the user scrolls away
 - A question panel for `ask_user`: choices, a written answer, or Skip
+- An instruction box that grows upward as the instruction does, to about twelve
+  lines, then scrolls
 - Activity page: every checkpoint with a revert button, every decision with its
   reason
 - Turkish and English, Turkish by default
@@ -104,6 +122,7 @@ everything else is not built yet, however well specified it looks.
 - `scripts/speed_experiments.py` and `scripts/ab_threads.py` — runtime knobs
 - `scripts/drift.py` — false and missed tool calls per prompt variant
 - `scripts/probe_toolcalls.py` — what format each installed model emits
+- `scripts/demo/` — the app over an example transcript, for the README pictures
 - Results in [`BENCHMARKS.md`](BENCHMARKS.md) and [`SPEED.md`](SPEED.md)
 
 ## Known gaps

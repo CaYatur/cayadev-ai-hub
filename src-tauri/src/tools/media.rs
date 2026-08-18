@@ -649,6 +649,51 @@ fn detect_python() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_oversized_capture_is_scaled_before_it_is_sent() {
+        // The development machine has three monitors: the primary is 1920x1080
+        // at the origin, but the virtual desktop is 5760x1516 starting at
+        // (-2560, -251). Capturing the primary screen missed two thirds of it,
+        // and capturing all of it produces an image no model reads at full
+        // resolution.
+        let dir = std::env::temp_dir().join(format!("cayahub-shrink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wide = dir.join("wide.png");
+        image::RgbImage::new(5760, 1516).save(&wide).unwrap();
+
+        let result = super::shrink_for_vision(&wide);
+        let scaled = image::ImageReader::open(&result).unwrap().decode().unwrap();
+        assert_eq!(scaled.width(), 1920, "not scaled to the long-edge limit");
+        assert!(scaled.height() < 1516, "aspect ratio was not preserved");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_small_capture_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("cayahub-shrink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.png");
+        image::RgbImage::new(1280, 720).save(&small).unwrap();
+
+        super::shrink_for_vision(&small);
+        let after = image::ImageReader::open(&small).unwrap().decode().unwrap();
+        assert_eq!((after.width(), after.height()), (1280, 720));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_image_is_returned_unchanged() {
+        // A preview is a convenience; it must never fail a capture.
+        let dir = std::env::temp_dir().join(format!("cayahub-shrink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let junk = dir.join("junk.png");
+        std::fs::write(&junk, b"not a png").unwrap();
+        assert_eq!(super::shrink_for_vision(&junk), junk);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::ollama::{Timeouts, DEFAULT_HOST};
 
