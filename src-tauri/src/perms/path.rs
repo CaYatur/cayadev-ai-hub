@@ -143,6 +143,18 @@ pub fn is_sensitive(path: &Path) -> bool {
     )
 }
 
+/// True for anything inside the checkpoint store.
+///
+/// The store lives under the workspace, which is exactly where `ProjectAuto`
+/// auto-approves writes — so without this an agent could overwrite its own undo
+/// history, and a plain `list_dir` would surface the store as project content.
+/// Refused for writes in every mode, `Unrestricted` included.
+pub fn is_checkpoint_store(path: &Path) -> bool {
+    normalize(path)
+        .components()
+        .any(|c| c.as_os_str() == crate::checkpoint::STORE_DIR)
+}
+
 /// Directories the operating system owns.
 ///
 /// Writing here breaks the machine rather than the project, so it is refused
@@ -252,6 +264,16 @@ mod tests {
         assert!(!is_sensitive(&p("/work/project/README.md")));
         // A project .env is an ordinary file the agent may edit.
         assert!(!is_sensitive(&p("/work/project/.env")));
+    }
+
+    #[test]
+    fn the_checkpoint_store_is_recognised_anywhere_in_a_path() {
+        assert!(is_checkpoint_store(&p("/work/project/.cayahub/journal.jsonl")));
+        assert!(is_checkpoint_store(&p("/work/project/.cayahub")));
+        assert!(is_checkpoint_store(&p("/work/project/sub/.cayahub/objects/ab/cd")));
+        assert!(!is_checkpoint_store(&p("/work/project/src/main.rs")));
+        // A file merely named like the store is not inside it.
+        assert!(!is_checkpoint_store(&p("/work/project/cayahub.txt")));
     }
 
     #[test]

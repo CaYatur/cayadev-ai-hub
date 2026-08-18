@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use command::{classify_command, CommandRisk};
-pub use path::{contains, normalize};
+pub use path::{contains, is_checkpoint_store, normalize};
 
 /// How much the agent may do without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +117,10 @@ pub enum Action {
     RunCommand { program: String, args: Vec<String>, cwd: Option<PathBuf> },
     /// Any request that leaves the machine.
     Network { url: String },
+    /// Something other people will see: a pull request, an issue, a comment, a
+    /// release, a push. Confirmed in every mode — `Unrestricted` means "do not
+    /// interrupt me about my own machine", not "post as me without asking".
+    Publish { summary: String },
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +162,11 @@ impl PermissionEngine {
             Action::DeleteFile { path } => self.eval_write(path, true),
             Action::RunCommand { program, args, cwd } => self.eval_command(program, args, cwd.as_deref()),
             Action::Network { url } => self.eval_network(url),
+            Action::Publish { summary } => Evaluation::ask(
+                format!("{summary}. This is visible to other people."),
+                CommandRisk::Mutating,
+                true,
+            ),
         }
     }
 
@@ -178,6 +187,12 @@ impl PermissionEngine {
     }
 
     fn eval_write(&self, path: &Path, destructive: bool) -> Evaluation {
+        if path::is_checkpoint_store(path) {
+            return Evaluation::deny(
+                "That path holds the undo history. Writing to it would destroy                  the ability to revert this session.",
+                CommandRisk::Destructive,
+            );
+        }
         if path::is_sensitive(path) {
             return Evaluation::deny(
                 "Path holds credentials or private keys. Writing to it is refused.",
@@ -409,6 +424,28 @@ mod tests {
                 cwd: Some(workspace_root()),
             });
             assert_eq!(e.decision, Decision::Deny, "{program} must never auto-run");
+        }
+    }
+
+    #[test]
+    fn the_checkpoint_store_cannot_be_written_in_any_mode() {
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::ProjectAuto,
+            PermissionMode::Balanced,
+            PermissionMode::Unrestricted,
+        ] {
+            let engine = engine(mode);
+            for action in [
+                Action::WriteFile { path: inside(".cayahub/journal.jsonl") },
+                Action::DeleteFile { path: inside(".cayahub/objects/ab/cd") },
+            ] {
+                assert_eq!(
+                    engine.evaluate(&action).decision,
+                    Decision::Deny,
+                    "{mode:?} must not let the agent touch its own undo history"
+                );
+            }
         }
     }
 

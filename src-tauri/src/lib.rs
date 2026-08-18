@@ -5,6 +5,7 @@
 //! for the measurements this is built on.
 
 pub mod agent;
+pub mod checkpoint;
 pub mod commands;
 pub mod ollama;
 pub mod perms;

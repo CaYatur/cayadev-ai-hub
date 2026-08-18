@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+pub mod github;
+
 use crate::agent::runner::ToolExecutor;
+use crate::checkpoint::{ChangeKind, CheckpointStore};
 use crate::ollama::types::Tool;
 use crate::perms::Action;
 
@@ -33,16 +36,49 @@ pub struct WorkspaceTools {
     /// When set, commands are classified and reported but never executed.
     /// Used by tests that must exercise destructive paths without running them.
     dry_run: bool,
+    /// Prior contents are captured here before a file is changed. `None`
+    /// disables undo, which is what tests that only exercise reads want.
+    checkpoints: Option<CheckpointStore>,
+    /// GitHub tools, offered only when the workspace is actually a repository.
+    github: Option<github::GitHubTools>,
 }
 
 impl WorkspaceTools {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
-        Self { workspace: workspace.into(), dry_run: false }
+        let workspace = workspace.into();
+        Self {
+            checkpoints: Some(CheckpointStore::new(&workspace)),
+            github: workspace
+                .join(".git")
+                .exists()
+                .then(|| github::GitHubTools::new(&workspace)),
+            workspace,
+            dry_run: false,
+        }
     }
 
     /// Build a tool surface that never actually executes commands.
     pub fn dry_run(workspace: impl Into<PathBuf>) -> Self {
-        Self { workspace: workspace.into(), dry_run: true }
+        let workspace = workspace.into();
+        Self { workspace, dry_run: true, checkpoints: None, github: None }
+    }
+
+    /// Build a tool surface with no undo history.
+    pub fn without_checkpoints(workspace: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.into();
+        Self { workspace, dry_run: false, checkpoints: None, github: None }
+    }
+
+    /// Capture a file's prior state, labelled with the call that will change it.
+    ///
+    /// A capture failure is logged and ignored rather than blocking the edit:
+    /// losing undo is bad, refusing to work is worse.
+    fn checkpoint(&self, path: &Path, kind: ChangeKind, label: &str) {
+        let Some(store) = &self.checkpoints else { return };
+        match store.capture(path, kind).and_then(|snap| store.record(label, vec![snap])) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!("checkpoint for {} failed: {e}", path.display()),
+        }
     }
 
     /// Resolve a model-supplied path against the workspace.
@@ -117,7 +153,7 @@ fn truncate(text: &str, limit: usize, unit: &str) -> String {
 impl ToolExecutor for WorkspaceTools {
     fn schemas(&self) -> Vec<Tool> {
         use serde_json::json;
-        vec![
+        let mut tools = vec![
             Tool::function(
                 "read_file",
                 "Read a file's contents.",
@@ -176,7 +212,13 @@ impl ToolExecutor for WorkspaceTools {
                     "required": ["command"]
                 }),
             ),
-        ]
+        ];
+        // Only advertise GitHub tools in a repository. Offering a model tools
+        // that cannot work is a reliable way to waste its steps.
+        if self.github.is_some() {
+            tools.extend(github::schemas());
+        }
+        tools
     }
 
     fn action_for(&self, name: &str, args: &Map<String, Value>) -> Option<Action> {
@@ -194,6 +236,9 @@ impl ToolExecutor for WorkspaceTools {
                     args,
                     cwd: Some(self.workspace.clone()),
                 })
+            }
+            other if other.starts_with("gh_") => {
+                github::action_for(other, args, &self.workspace)
             }
             _ => None,
         }
@@ -214,6 +259,7 @@ impl ToolExecutor for WorkspaceTools {
                 let raw = Self::arg_str(args, "path").ok_or("missing `path`")?;
                 let content = Self::arg_str(args, "content").ok_or("missing `content`")?;
                 let path = self.resolve(&raw);
+                self.checkpoint(&path, ChangeKind::Modified, &format!("write_file {raw}"));
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
                         .await
@@ -240,6 +286,7 @@ impl ToolExecutor for WorkspaceTools {
                 match content.matches(&old).count() {
                     0 => Err(format!("`old` text not found in {}", path.display())),
                     1 => {
+                        self.checkpoint(&path, ChangeKind::Modified, &format!("edit_file {raw}"));
                         let updated = content.replace(&old, &new);
                         tokio::fs::write(&path, &updated)
                             .await
@@ -318,6 +365,11 @@ impl ToolExecutor for WorkspaceTools {
                 // The model needs the exit code to know whether to keep going.
                 Ok(format!("exit {code}\n{result}"))
             }
+
+            other if other.starts_with("gh_") => match &self.github {
+                Some(gh) => gh.execute(other, args).await,
+                None => Err("this folder is not a git repository".into()),
+            },
 
             other => Err(format!("unknown tool `{other}`")),
         }
@@ -502,6 +554,65 @@ mod tests {
         let loose = PermissionEngine::new(&dir, PermissionMode::Unrestricted);
         assert_eq!(loose.evaluate(&action).decision, Decision::Allow);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_write_can_be_undone() {
+        let dir = scratch();
+        let tools = WorkspaceTools::new(&dir);
+        std::fs::write(dir.join("a.txt"), "before").unwrap();
+
+        tools
+            .execute("write_file", &args(json!({"path": "a.txt", "content": "after"})))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "after");
+
+        let store = crate::checkpoint::CheckpointStore::new(&dir);
+        let latest = store.list().unwrap().pop().expect("a checkpoint");
+        store.restore(&latest.id).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "before");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn an_edit_can_be_undone() {
+        let dir = scratch();
+        let tools = WorkspaceTools::new(&dir);
+        std::fs::write(dir.join("b.txt"), "hello world").unwrap();
+
+        tools
+            .execute("edit_file", &args(json!({"path": "b.txt", "old": "world", "new": "there"})))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "hello there");
+
+        let store = crate::checkpoint::CheckpointStore::new(&dir);
+        let latest = store.list().unwrap().pop().unwrap();
+        store.restore(&latest.id).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "hello world");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_created_file_is_removed_by_undo() {
+        let dir = scratch();
+        let tools = WorkspaceTools::new(&dir);
+
+        tools
+            .execute("write_file", &args(json!({"path": "fresh.txt", "content": "new"})))
+            .await
+            .unwrap();
+        assert!(dir.join("fresh.txt").exists());
+
+        let store = crate::checkpoint::CheckpointStore::new(&dir);
+        let latest = store.list().unwrap().pop().unwrap();
+        store.restore(&latest.id).unwrap();
+
+        assert!(!dir.join("fresh.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 
