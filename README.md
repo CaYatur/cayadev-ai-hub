@@ -35,11 +35,12 @@ The honest version, measured on the development machine — full table in
 | Model | Decode | TTFT | Placement |
 | --- | ---: | ---: | --- |
 | `qwen3.8` 27B Q4_K_M | 5.4 tok/s | 1.5 s | 80% CPU / 20% GPU |
-| `qwen2.5-coder:7b` | **57.3 tok/s** | **0.40 s** | 100% GPU |
+| `qwen2.5-coder:7b` | **42.3 tok/s** | **0.40 s** | 100% GPU |
 | `qwen2.5-coder:0.5b` | 316.3 tok/s | 0.19 s | 100% GPU |
 
-On an 8 GB card, a 7B model that fits in VRAM decodes **~10x faster** than a 27B
-model that does not. No sampling flag closes that gap — we measured context
+On an 8 GB card, a 7B model that fits in VRAM decodes **~8x faster** than a 27B
+model that does not (42 tok/s reproduced across three warm runs; it reached 57
+in favourable conditions, but the conservative figure is the one quoted). No sampling flag closes that gap — we measured context
 sizes across a 16x range on the 27B and every result landed within noise of 5
 tok/s.
 

@@ -1,100 +1,93 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import "./styles/app.css";
-
-/** A model as reported by /api/tags, enriched with what /api/show tells us. */
-type Model = {
-  name: string;
-  sizeBytes: number;
-  params: string;
-  quant: string;
-  capabilities: string[];
-  maxContext: number | null;
-  placement: Placement;
-};
 
 type Placement = "resident" | "marginal" | "spilled" | "cloud" | "unknown";
 
-const HOST = "http://localhost:11434";
+/** Mirrors `ModelProfile` in src-tauri/src/ollama/registry.rs. */
+type ModelProfile = {
+  name: string;
+  family: string;
+  parameter_size: string;
+  quantization: string;
+  weights_bytes: number;
+  capabilities: {
+    completion: boolean;
+    tools: boolean;
+    vision: boolean;
+    thinking: boolean;
+    embedding: boolean;
+  };
+  max_context: number | null;
+  recommended_context: number | null;
+  placement: Placement;
+};
 
-/** Mirrors `estimate_placement` in src-tauri/src/ollama/registry.rs. */
-const OVERHEAD = 600 * 1024 * 1024;
-
-function estimatePlacement(weights: number, availableVram: number): Placement {
-  if (weights === 0) return "cloud";
-  const withOverhead = weights + OVERHEAD;
-  if (withOverhead >= availableVram) return "spilled";
-  if (withOverhead > availableVram * 0.85) return "marginal";
-  return "resident";
-}
+type Routing = { assignments: Record<string, string>; prefer_resident: boolean };
 
 const PLACEMENT_COPY: Record<Placement, { label: string; hint: string }> = {
-  resident: { label: "Fits in VRAM", hint: "Full speed — expect tens of tokens/sec." },
+  resident: { label: "Fits in VRAM", hint: "Full speed — tens of tokens/sec." },
   marginal: { label: "Tight fit", hint: "Fits only when little else uses the GPU." },
-  spilled: { label: "Spills to RAM", hint: "Memory-bandwidth bound. Expect single-digit tokens/sec." },
-  cloud: { label: "Cloud", hint: "Runs on Ollama's servers; local memory does not apply." },
+  spilled: {
+    label: "Spills to RAM",
+    hint: "Memory-bandwidth bound. Expect single-digit tokens/sec.",
+  },
+  cloud: { label: "Cloud", hint: "Runs remotely; local memory does not apply." },
   unknown: { label: "Unknown", hint: "Not enough metadata to estimate." },
 };
 
+const TASK_LABELS: Record<string, string> = {
+  reasoning: "Planning & hard debugging",
+  coding: "Writing code",
+  edit: "Mechanical edits",
+  classify: "Approvals & routing",
+  vision: "Images",
+  summarize: "Summaries & titles",
+};
+
 function formatBytes(n: number): string {
-  if (n === 0) return "—";
+  if (!n) return "—";
   const gb = n / 1024 ** 3;
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(n / 1024 ** 2).toFixed(0)} MB`;
 }
 
+function capabilityList(c: ModelProfile["capabilities"]): string[] {
+  return Object.entries(c)
+    .filter(([, on]) => on)
+    .map(([name]) => name);
+}
+
 export default function App() {
-  const [models, setModels] = useState<Model[]>([]);
+  const [models, setModels] = useState<ModelProfile[]>([]);
+  const [routing, setRouting] = useState<Routing | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
-  // Not probed from the GPU yet — the Rust side will supply the real budget.
-  const availableVram = 6 * 1024 ** 3;
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
+    (async () => {
       try {
-        const tags = await fetch(`${HOST}/api/tags`).then((r) => r.json());
-        const entries = await Promise.all(
-          (tags.models ?? []).map(async (m: any) => {
-            let show: any = {};
-            try {
-              show = await fetch(`${HOST}/api/show`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ model: m.name }),
-              }).then((r) => r.json());
-            } catch {
-              // A model whose metadata will not load still deserves a row.
-            }
-            const arch = show?.model_info?.["general.architecture"];
-            return {
-              name: m.name,
-              sizeBytes: m.size ?? 0,
-              params: m.details?.parameter_size ?? "—",
-              quant: m.details?.quantization_level ?? "—",
-              capabilities: show?.capabilities ?? [],
-              maxContext: arch ? show?.model_info?.[`${arch}.context_length`] ?? null : null,
-              placement: estimatePlacement(m.size ?? 0, availableVram),
-            } as Model;
-          }),
-        );
+        const v = await invoke<string>("ollama_version");
+        const list = await invoke<ModelProfile[]>("list_models");
+        // Depends on list_models having populated state, so it runs after.
+        const policy = await invoke<Routing>("routing_policy");
         if (cancelled) return;
-        // Fastest-first: the routing story is easier to read this way.
-        entries.sort((a, b) => a.sizeBytes - b.sizeBytes);
-        setModels(entries);
+        setVersion(v);
+        setModels([...list].sort((a, b) => a.weights_bytes - b.weights_bytes));
+        setRouting(policy);
       } catch (e) {
         if (!cancelled) setError(String(e));
       } finally {
         if (!cancelled) setLoading(false);
       }
-    }
+    })();
 
-    load();
     return () => {
       cancelled = true;
     };
-  }, [availableVram]);
+  }, []);
 
   return (
     <div className="shell">
@@ -102,16 +95,19 @@ export default function App() {
         <div className="brand">
           CaYa<span>Dev</span> AI Hub
         </div>
-        <div className="topbar-meta">Ollama · localhost:11434</div>
+        <div className="topbar-meta">
+          {version ? `Ollama ${version} · localhost:11434` : "connecting…"}
+        </div>
       </header>
 
       <main className="content">
         <section className="intro">
           <h1>Installed models</h1>
           <p>
-            Placement is estimated against available VRAM. A model that spills to
-            system RAM is bound by memory bandwidth — routing work to a resident
-            model is worth roughly 10x on this hardware.
+            Placement is estimated against available VRAM, accounting for hybrid
+            attention. A model that spills to system RAM is bound by memory
+            bandwidth — routing work to a resident model is worth roughly 10x on
+            this hardware.
           </p>
         </section>
 
@@ -119,10 +115,24 @@ export default function App() {
 
         {error && (
           <div className="state state-error">
-            Could not reach Ollama at {HOST}.
+            Could not reach Ollama.
             <br />
             <span className="muted">{error}</span>
           </div>
+        )}
+
+        {routing && (
+          <section className="routing">
+            <h2>Routing</h2>
+            <div className="routing-rows">
+              {Object.entries(routing.assignments).map(([task, model]) => (
+                <div key={task} className="routing-row">
+                  <span className="routing-task">{TASK_LABELS[task] ?? task}</span>
+                  <span className="routing-model">{model}</span>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         {!loading && !error && (
@@ -139,30 +149,28 @@ export default function App() {
                 <dl className="facts">
                   <div>
                     <dt>Size</dt>
-                    <dd>{formatBytes(m.sizeBytes)}</dd>
+                    <dd>{formatBytes(m.weights_bytes)}</dd>
                   </div>
                   <div>
                     <dt>Params</dt>
-                    <dd>{m.params}</dd>
-                  </div>
-                  <div>
-                    <dt>Quant</dt>
-                    <dd>{m.quant}</dd>
+                    <dd>{m.parameter_size || "—"}</dd>
                   </div>
                   <div>
                     <dt>Max context</dt>
-                    <dd>{m.maxContext ? m.maxContext.toLocaleString() : "—"}</dd>
+                    <dd>{m.max_context?.toLocaleString() ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Suggested</dt>
+                    <dd>{m.recommended_context?.toLocaleString() ?? "—"}</dd>
                   </div>
                 </dl>
-                {m.capabilities.length > 0 && (
-                  <div className="caps">
-                    {m.capabilities.map((c) => (
-                      <span key={c} className="cap">
-                        {c}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                <div className="caps">
+                  {capabilityList(m.capabilities).map((c) => (
+                    <span key={c} className="cap">
+                      {c}
+                    </span>
+                  ))}
+                </div>
               </article>
             ))}
           </div>

@@ -187,3 +187,46 @@
   color: var(--text-secondary);
   border: 1px solid var(--line);
 }
+
+/* --------------------------------------------------------------- routing */
+
+.routing {
+  margin-bottom: 28px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-medium);
+}
+
+.routing h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.routing-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px 20px;
+}
+
+.routing-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.routing-task {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.routing-model {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--primary-light);
+}

@@ -21,20 +21,33 @@ RESULTS = []
 
 
 def ps_state():
-    """Read SIZE / PROCESSOR / CONTEXT that Ollama actually allocated."""
+    """Read SIZE / PROCESSOR / CONTEXT that Ollama actually allocated.
+
+    `ollama ps` pads its columns with runs of spaces, and several fields
+    contain single spaces of their own ("20 GB", "80%/20% CPU/GPU"). Splitting
+    on 2+ spaces follows the real column boundaries; a token-based regex
+    backtracks into the middle of a field and silently reports garbage.
+    """
     try:
         out = subprocess.run(
             ["ollama", "ps"], capture_output=True, text=True, timeout=30
         ).stdout
     except Exception:  # noqa: BLE001
         return {}
-    for line in out.splitlines()[1:]:
-        if not line.strip():
-            continue
-        m = re.match(r"(\S+)\s+(\S+)\s+([\d.]+\s*\w+)\s+(\S+)\s+(\d+)", line)
-        if m:
-            return {"size": m.group(3), "processor": m.group(4), "ctx": int(m.group(5))}
-    return {}
+
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return {}  # Header only: nothing is loaded.
+
+    cols = re.split(r"\s{2,}", lines[1].strip())
+    # NAME  ID  SIZE  PROCESSOR  CONTEXT  UNTIL
+    if len(cols) < 5:
+        return {}
+    try:
+        ctx = int(cols[4])
+    except ValueError:
+        ctx = None
+    return {"size": cols[2], "processor": cols[3], "ctx": ctx}
 
 
 def run(model, num_ctx, think=False, extra=None, label=""):

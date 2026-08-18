@@ -68,7 +68,10 @@ static CODE_FENCE: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 
 static PYTHON_CALL: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^)]*)\s*\)\s*$")
+    // Hyphens and dots are not legal in a Python identifier, but models emit
+    // `read-file(path="a")` anyway. Accepting them costs nothing: the name
+    // still has to resolve against a registered tool to become a call.
+    regex::Regex::new(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\(\s*([^)]*)\s*\)\s*$")
         .expect("static regex")
 });
 
@@ -116,7 +119,7 @@ fn try_xml_tag(content: &str, known: &[String]) -> Option<Extracted> {
 
 fn try_function_tag(content: &str, known: &[String]) -> Option<Extracted> {
     collect_spans(content, &FUNCTION_TAG, Recovery::FunctionTag, known, |caps| {
-        let name = caps.get(1)?.as_str().to_string();
+        let name = resolve_tool_name(caps.get(1)?.as_str(), known)?;
         let args = repair_json(caps.get(2)?.as_str())
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
@@ -134,10 +137,9 @@ fn try_code_fence(content: &str, known: &[String]) -> Option<Extracted> {
 
 fn try_python_call(content: &str, known: &[String]) -> Option<Extracted> {
     collect_spans(content, &PYTHON_CALL, Recovery::PythonCall, known, |caps| {
-        let name = caps.get(1)?.as_str().to_string();
-        if !known.iter().any(|k| k == &name) {
-            return None; // Avoid mistaking ordinary prose for a call.
-        }
+        // Resolving here also filters prose: an unrecognised name yields
+        // None, so `println(...)` in a sentence is not taken for a call.
+        let name = resolve_tool_name(caps.get(1)?.as_str(), known)?;
         let mut args = Map::new();
         for kw in PY_KWARG.captures_iter(caps.get(2)?.as_str()) {
             let key = kw.get(1)?.as_str().to_string();
@@ -641,11 +643,32 @@ mod tests {
 
     #[test]
     fn separator_and_case_variants_all_resolve() {
+        // Every syntax must resolve names, not just the JSON one.
         for spelling in ["read_file", "ReadFile", "readFile", "read-file", "READ_FILE"] {
-            let text = format!(r#"{{"name": "{spelling}", "arguments": {{"path": "a"}}}}"#);
-            let ex = extract(&text, None, &tools())
-                .unwrap_or_else(|| panic!("{spelling} should resolve"));
-            assert_eq!(ex.calls[0].function.name, "read_file", "from {spelling}");
+            let forms = [
+                format!(r#"{{"name": "{spelling}", "arguments": {{"path": "a"}}}}"#),
+                format!(r#"<function={spelling}>{{"path": "a"}}</function>"#),
+                format!(r#"{spelling}(path="a")"#),
+            ];
+            for text in forms {
+                let ex = extract(&text, None, &tools())
+                    .unwrap_or_else(|| panic!("should resolve: {text}"));
+                assert_eq!(
+                    ex.calls[0].function.name, "read_file",
+                    "canonical name expected from: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_names_are_rejected_in_every_syntax() {
+        for text in [
+            r#"{"name": "not_a_tool", "arguments": {}}"#,
+            r#"<function=not_a_tool>{}</function>"#,
+            r#"not_a_tool(path="a")"#,
+        ] {
+            assert!(extract(text, None, &tools()).is_none(), "should reject: {text}");
         }
     }
 

@@ -5,6 +5,7 @@
 //! for the measurements this is built on.
 
 pub mod agent;
+pub mod commands;
 pub mod ollama;
 pub mod perms;
 
@@ -19,6 +20,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(commands::AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::ollama_version,
+            commands::list_models,
+            commands::routing_policy,
+            commands::set_vram_budget,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
