@@ -36,6 +36,7 @@ pub fn run() {
             commands::set_assisted_approval,
             commands::resolve_approval,
             commands::cancel_run,
+            commands::answer_question,
             commands::run_agent,
             commands::context_options,
             commands::checkpoint_list,

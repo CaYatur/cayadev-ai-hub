@@ -137,6 +137,11 @@ pub enum Action {
     /// contains whatever else happened to be open, which the user did not
     /// choose to share.
     CaptureScreen { what: String },
+    /// Putting a question to the user. Allowed in every mode, including
+    /// `ReadOnly`: it reads nothing, writes nothing and sends nothing, and a
+    /// mode that refuses it would leave the agent guessing instead of asking,
+    /// which is the behaviour it exists to prevent.
+    AskUser,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +178,8 @@ impl PermissionEngine {
 
     pub fn evaluate(&self, action: &Action) -> Evaluation {
         match action {
+            // The user is the one being asked; there is nothing to permit.
+            Action::AskUser => Evaluation::allow("Asks you a question."),
             Action::ReadFile { path } | Action::ListDir { path } => self.eval_read(path),
             Action::WriteFile { path } => self.eval_write(path, false),
             Action::DeleteFile { path } => self.eval_write(path, true),

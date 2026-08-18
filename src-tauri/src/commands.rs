@@ -39,6 +39,8 @@ pub struct AppState {
     /// Whether the classifier may settle escalated calls.
     pub assisted_approval: RwLock<bool>,
     pub pending: PendingApprovals,
+    /// Questions the agent has put to the user and is waiting on.
+    pub questions: crate::session::PendingQuestions,
     /// Files dragged or pasted into the chat.
     ///
     /// They usually live outside the workspace, which the permission engine
@@ -66,6 +68,7 @@ impl AppState {
             mode: RwLock::new(PermissionMode::default()),
             assisted_approval: RwLock::new(true),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            questions: Arc::new(Mutex::new(HashMap::new())),
             attachments: RwLock::new(Vec::new()),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -176,13 +179,32 @@ pub async fn resolve_approval(
 
 /// Stop the current run at once.
 ///
-/// Sets the flag the runner and the HTTP stream both poll, then refuses every
-/// approval still waiting so nothing is left blocked on an answer.
+/// Sets the flag the runner and the HTTP stream both poll, then clears anything
+/// the run could be parked on: approvals are refused and questions are skipped,
+/// so Stop reaches a run waiting on the user as well as one mid-token.
 #[tauri::command]
 pub async fn cancel_run(state: State<'_, AppState>) -> Result<(), String> {
     state.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     session::reject_all(&state.pending).await;
+    session::skip_all(&state.questions).await;
     Ok(())
+}
+
+/// Answer a question the agent asked. `None` means the user skipped it.
+#[tauri::command]
+pub async fn answer_question(
+    state: State<'_, AppState>,
+    id: String,
+    answer: Option<String>,
+) -> Result<bool, String> {
+    let reply = match answer {
+        Some(text) if !text.trim().is_empty() => {
+            crate::tools::ask::Answer::Given(text.trim().to_string())
+        }
+        // An empty box submitted is the same as declining to answer.
+        _ => crate::tools::ask::Answer::Skipped,
+    };
+    Ok(session::answer(&state.questions, &id, reply).await)
 }
 
 /// Run the agent on one instruction, streaming events to the frontend.
@@ -285,6 +307,10 @@ pub async fn run_agent(
     let mode = *state.mode.read().await;
 
     let mut tools = WorkspaceTools::new(&workspace)
+        .with_asker(Arc::new(crate::session::UiAsker::new(
+            app.clone(),
+            state.questions.clone(),
+        )))
         .with_media(
             state.client.clone(),
             policy.get(TaskClass::Vision).map(str::to_string),

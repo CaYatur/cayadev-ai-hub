@@ -106,6 +106,9 @@ export const api = {
   setAssisted: (enabled: boolean) => invoke<void>("set_assisted_approval", { enabled }),
   resolveApproval: (id: string, approved: boolean) =>
     invoke<boolean>("resolve_approval", { id, approved }),
+  /** Answer the agent's question. `null` skips it. */
+  answerQuestion: (id: string, answer: string | null) =>
+    invoke<boolean>("answer_question", { id, answer }),
   cancel: () => invoke<void>("cancel_run"),
   run: (
     prompt: string,
@@ -126,18 +129,38 @@ export const api = {
     invoke<Attachment>("attach_bytes", { name, data }),
 };
 
-/** Subscribe to run events and approval questions. */
+/**
+ * A question the agent asked, rather than one the permission engine asked.
+ *
+ * Approval is "may I do this?" about something already decided. This is
+ * "which?" or "what?" about something not yet decided — the choice that is the
+ * user's to make, asked instead of guessed.
+ */
+export type Question = {
+  id: string;
+  question: string;
+  /** Choices to offer. Empty means the answer is written, not picked. */
+  options: string[];
+  multiple: boolean;
+};
+
+/** Subscribe to run events, approval questions, and the agent's own questions. */
 export async function subscribe(
   onEvent: (e: AgentEvent) => void,
   onApproval: (c: ProposedCall) => void,
+  onQuestion: (q: Question) => void,
 ): Promise<UnlistenFn> {
   const offEvent = await listen<AgentEvent>("agent://event", (e) => onEvent(e.payload));
   const offApproval = await listen<ProposedCall>("agent://approval", (e) =>
     onApproval(e.payload),
   );
+  const offQuestion = await listen<Question>("agent://question", (e) =>
+    onQuestion(e.payload),
+  );
   return () => {
     offEvent();
     offApproval();
+    offQuestion();
   };
 }
 

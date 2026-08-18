@@ -14,6 +14,7 @@ import {
   type ModelProfile,
   type PermissionMode,
   type ProposedCall,
+  type Question,
 } from "./lib/agent";
 import {
   applyMetrics,
@@ -43,6 +44,7 @@ export default function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [pending, setPending] = useState<ProposedCall | null>(null);
+  const [question, setQuestion] = useState<Question | null>(null);
 
   // Run settings live here, not in `Chat`. `Chat` unmounts when the Models view
   // is shown, and local state there would silently revert to defaults while the
@@ -198,6 +200,7 @@ export default function App() {
         }
       },
       (call) => setPending(call),
+      (asked) => setQuestion(asked),
     ).then((fn) => {
       // The subscription resolves asynchronously, so a cleanup that ran first
       // would leave this listener attached forever — and every event would then
@@ -331,6 +334,7 @@ export default function App() {
         setRunStartedAt(null);
         setLiveTokens(0);
         setPending(null);
+        setQuestion(null);
       }
     },
     [active, append, model, numCtx, effort],
@@ -426,9 +430,30 @@ export default function App() {
     [pending],
   );
 
+  /// Answer the agent's question, or skip it with `null`.
+  const reply = useCallback(
+    async (text: string | null) => {
+      if (!question) return;
+      // Cleared first: the run resumes the moment the answer lands, and a
+      // panel still on screen over a working agent reads as a hung dialogue.
+      const id = question.id;
+      setQuestion(null);
+      await api.answerQuestion(id, text);
+      if (activeRef.current) {
+        append(activeRef.current, {
+          kind: "notice",
+          tone: "info",
+          text: text ? `${question.question} → ${text}` : t("ask.skippedNotice"),
+        });
+      }
+    },
+    [question, append, t],
+  );
+
   const cancel = useCallback(async () => {
     await api.cancel();
     setPending(null);
+    setQuestion(null);
   }, []);
 
   const startSession = useCallback(() => {
@@ -502,6 +527,7 @@ export default function App() {
             routing={routing}
             running={running}
             pending={pending}
+            question={question}
             mode={mode}
             assisted={assisted}
             model={model}
@@ -509,6 +535,7 @@ export default function App() {
             numCtx={numCtx}
             onSend={send}
             onAnswer={answer}
+            onReply={reply}
             onWorkspace={setWorkspace}
             onCancel={cancel}
             onMode={changeMode}

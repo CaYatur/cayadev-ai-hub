@@ -143,5 +143,13 @@
     "denied": "reddedildi",
     "failed": "başarısız",
     "waiting": "bekliyor"
+  },
+  "ask": {
+    "title": "Ajan soruyor",
+    "skip": "Atla",
+    "send": "Yanıtla",
+    "orWrite": "Ya da kendi yanıtını yaz…",
+    "writePlaceholder": "Yanıtın…",
+    "skippedNotice": "Soru atlandı."
   }
 }

@@ -1926,3 +1926,78 @@
 .attachment-image {
   padding-left: 4px;
 }
+
+/* ------------------------------------------------------------- asking == */
+
+/*
+ * Same frame as the approval panel — both stop the run and want an answer —
+ * but in the neutral colour, because this is a choice rather than a risk.
+ */
+.approval-question {
+  border-left-color: var(--info);
+}
+
+.ask-question {
+  margin: 4px 0 10px;
+  font-size: 13.5px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.ask-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-medium);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.ask-option:hover {
+  border-color: var(--info);
+  color: var(--text-primary);
+}
+
+.ask-option-on {
+  border-color: var(--info);
+  background: rgba(76, 194, 255, 0.12);
+  color: var(--text-primary);
+}
+
+.ask-check {
+  width: 10px;
+  font-size: 11px;
+  color: var(--info);
+}
+
+.ask-input {
+  width: 100%;
+  padding: 8px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--ink-1);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+.ask-input::placeholder {
+  color: var(--text-faint);
+}
+
+.ask-input:focus {
+  border-color: var(--info);
+  outline: none;
+}

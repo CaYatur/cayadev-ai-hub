@@ -708,3 +708,96 @@ async fn a_run_without_tools_still_completes() {
     assert_eq!(reason, StopReason::Completed, "said: {}", t.text);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Answers whatever is asked, and records the question.
+struct StubAsker {
+    reply: String,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl cayadev_ai_hub_lib::tools::ask::Asker for StubAsker {
+    async fn ask(
+        &self,
+        question: cayadev_ai_hub_lib::tools::ask::Question,
+    ) -> cayadev_ai_hub_lib::tools::ask::Answer {
+        self.asked.lock().unwrap().push(question.question);
+        cayadev_ai_hub_lib::tools::ask::Answer::Given(self.reply.clone())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn the_agent_asks_rather_than_guessing() {
+    // Two files it could plausibly mean, and nothing in the request to choose
+    // between them. Guessing here costs a whole run; asking costs a click.
+    let dir = scratch("ask");
+    std::fs::write(dir.join("config.dev.json"), "{}\n").unwrap();
+    std::fs::write(dir.join("config.prod.json"), "{}\n").unwrap();
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let asker = Arc::new(StubAsker {
+        reply: "config.prod.json".into(),
+        asked: asked.clone(),
+    });
+
+    let mut tools = WorkspaceTools::new(&dir).with_asker(asker);
+    let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: CODER.into(),
+            max_steps: 6,
+            num_ctx: Some(8192),
+            params_billions: Some(7.0),
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let log = Arc::new(Mutex::new(Transcript::default()));
+    let sink = log.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let mut t = sink.lock().unwrap();
+            match ev {
+                AgentEvent::Token { text } => t.text.push_str(&text),
+                AgentEvent::ToolProposed { call } => t.tools_called.push(call.name.clone()),
+                AgentEvent::StepDone { metrics, .. } => {
+                    t.steps += 1;
+                    t.decode_tps.push(metrics.decode_tps);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let reason = runner
+        .run(
+            "Use the ask_user tool to ask me which config file to read, offering \
+             config.dev.json and config.prod.json as the options. Then read the one \
+             I pick and tell me what is in it.",
+            &mut tools,
+            &AutoApprove,
+            tx,
+        )
+        .await;
+    let _ = collector.await;
+    let t = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
+
+    report("coder/ask", &reason, &t);
+    assert!(
+        t.tools_called.iter().any(|n| n == "ask_user"),
+        "the agent never asked: {:?}",
+        t.tools_called
+    );
+    assert!(!asked.lock().unwrap().is_empty(), "no question reached the asker");
+    // The answer has to come back as a fact the run then acts on.
+    assert!(
+        t.tools_called.iter().skip_while(|n| *n != "ask_user").any(|n| n == "read_file"),
+        "the run did not continue after the answer: {:?}",
+        t.tools_called
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

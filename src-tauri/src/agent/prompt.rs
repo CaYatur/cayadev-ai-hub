@@ -72,7 +72,7 @@ impl PromptTier {
     pub fn tool_budget(&self) -> usize {
         match self {
             Self::Minimal => 6,
-            Self::Compact => 15,
+            Self::Compact => 16,
             Self::Full => usize::MAX,
         }
     }
@@ -102,6 +102,9 @@ const CORE_TOOLS: &[&str] = &[
 /// Ordering by usefulness in code keeps that decision visible, instead of
 /// leaving it to the order the surface happens to be built in.
 const PRIORITY_TOOLS: &[&str] = &[
+    // Asking beats guessing, and a model that cannot ask guesses. Cheap enough
+    // to keep at every tier that has room.
+    "ask_user",
     // Research, and the most common reason to reach outside the project.
     "web_search",
     "web_read",

@@ -18,9 +18,17 @@ use crate::agent::approver::{AssistedGate, ModelOracle};
 use crate::agent::runner::{ApprovalGate, ProposedCall};
 use crate::ollama::OllamaClient;
 use crate::perms::Outcome;
+use crate::tools::ask::{Answer, Asker, Question};
 
 /// Calls waiting on a human answer, keyed by call id.
 pub type PendingApprovals = Arc<Mutex<HashMap<String, oneshot::Sender<Outcome>>>>;
+
+/// Questions the agent has put to the user, keyed by question id.
+///
+/// Kept apart from approvals deliberately: an approval carries a verdict and a
+/// question carries text, and folding them into one map would mean a lost
+/// question could arrive as an approval.
+pub type PendingQuestions = Arc<Mutex<HashMap<String, oneshot::Sender<Answer>>>>;
 
 /// Asks the user, through the UI.
 pub struct UiGate {
@@ -48,6 +56,51 @@ impl ApprovalGate for UiGate {
 
         // A dropped sender means the UI went away mid-question.
         rx.await.unwrap_or(Outcome::UserRejected)
+    }
+}
+
+/// Puts the agent's own questions to the user.
+pub struct UiAsker {
+    app: AppHandle,
+    pending: PendingQuestions,
+}
+
+impl UiAsker {
+    pub fn new(app: AppHandle, pending: PendingQuestions) -> Self {
+        Self { app, pending }
+    }
+}
+
+#[async_trait::async_trait]
+impl Asker for UiAsker {
+    async fn ask(&self, question: Question) -> Answer {
+        let (tx, rx) = oneshot::channel();
+        let id = question.id.clone();
+        self.pending.lock().await.insert(id.clone(), tx);
+
+        if self.app.emit("agent://question", &question).is_err() {
+            // No window to ask. Treating that as a skip lets the run carry on
+            // under its own judgement, which is better than stalling forever.
+            self.pending.lock().await.remove(&id);
+            return Answer::Skipped;
+        }
+        rx.await.unwrap_or(Answer::Skipped)
+    }
+}
+
+/// Deliver an answer to a waiting question.
+pub async fn answer(pending: &PendingQuestions, id: &str, answer: Answer) -> bool {
+    match pending.lock().await.remove(id) {
+        Some(tx) => tx.send(answer).is_ok(),
+        None => false,
+    }
+}
+
+/// Skip every waiting question. Used when a run is cancelled.
+pub async fn skip_all(pending: &PendingQuestions) {
+    let waiting: Vec<_> = pending.lock().await.drain().collect();
+    for (_, tx) in waiting {
+        let _ = tx.send(Answer::Skipped);
     }
 }
 
@@ -143,5 +196,40 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Outcome>();
         drop(tx);
         assert_eq!(rx.await.unwrap_or(Outcome::UserRejected), Outcome::UserRejected);
+    }
+
+    fn questions() -> PendingQuestions {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_the_waiting_run() {
+        let q = questions();
+        let (tx, rx) = oneshot::channel();
+        q.lock().await.insert("q1".into(), tx);
+
+        assert!(answer(&q, "q1", Answer::Given("src/main.rs".into())).await);
+        assert_eq!(rx.await.unwrap(), Answer::Given("src/main.rs".into()));
+    }
+
+    #[tokio::test]
+    async fn cancelling_skips_every_waiting_question() {
+        // Stop has to reach a run parked on a question, or the only way out is
+        // to answer something the user did not want to answer.
+        let q = questions();
+        let (tx, rx) = oneshot::channel();
+        q.lock().await.insert("q1".into(), tx);
+
+        skip_all(&q).await;
+
+        assert_eq!(rx.await.unwrap(), Answer::Skipped);
+        assert!(q.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lost_window_skips_rather_than_stalling() {
+        let (tx, rx) = oneshot::channel::<Answer>();
+        drop(tx);
+        assert_eq!(rx.await.unwrap_or(Answer::Skipped), Answer::Skipped);
     }
 }

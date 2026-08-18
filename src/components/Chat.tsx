@@ -10,6 +10,7 @@ import {
   type ModelProfile,
   type PermissionMode,
   type ProposedCall,
+  type Question,
 } from "../lib/agent";
 import {
   formatAgo,
@@ -126,6 +127,83 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
           {text}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The agent's own question, put to the user.
+ *
+ * Options and a written answer are offered together rather than as separate
+ * modes: the model's list is a guess at what the user might say, and the guess
+ * is often nearly right. Skip is always there — a question the user does not
+ * want to answer must not be able to hold a run open.
+ */
+function QuestionPanel({
+  question,
+  onReply,
+}: {
+  question: Question;
+  onReply: (answer: string | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [picked, setPicked] = useState<string[]>([]);
+  const [written, setWritten] = useState("");
+
+  function toggle(option: string) {
+    if (!question.multiple) {
+      onReply(option);
+      return;
+    }
+    setPicked((prev) =>
+      prev.includes(option) ? prev.filter((p) => p !== option) : [...prev, option],
+    );
+  }
+
+  const answer = picked.length > 0 ? picked.join(", ") : written.trim();
+
+  return (
+    <div className="approval approval-question">
+      <div className="approval-body">
+        <div className="approval-title">{t("ask.title")}</div>
+        <div className="ask-question">{question.question}</div>
+        {question.options.length > 0 && (
+          <div className="ask-options">
+            {question.options.map((option) => (
+              <button
+                key={option}
+                className={picked.includes(option) ? "ask-option ask-option-on" : "ask-option"}
+                onClick={() => toggle(option)}
+              >
+                {question.multiple && (
+                  <span className="ask-check">{picked.includes(option) ? "✓" : ""}</span>
+                )}
+                {option}
+              </button>
+            ))}
+          </div>
+        )}
+        <input
+          className="ask-input"
+          placeholder={
+            question.options.length > 0 ? t("ask.orWrite") : t("ask.writePlaceholder")
+          }
+          value={written}
+          onChange={(e) => setWritten(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && answer) onReply(answer);
+          }}
+          autoFocus
+        />
+      </div>
+      <div className="approval-actions">
+        <button className="btn" onClick={() => onReply(null)}>
+          {t("ask.skip")}
+        </button>
+        <button className="btn btn-primary" disabled={!answer} onClick={() => onReply(answer)}>
+          {t("ask.send")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -278,6 +356,7 @@ export default function Chat({
   routing,
   running,
   pending,
+  question,
   mode,
   assisted,
   model,
@@ -291,6 +370,7 @@ export default function Chat({
   onDetach,
   onSend,
   onAnswer,
+  onReply,
   onWorkspace,
   onCancel,
   onMode,
@@ -309,6 +389,7 @@ export default function Chat({
   routing: Record<string, string> | null;
   running: boolean;
   pending: ProposedCall | null;
+  question: Question | null;
   mode: PermissionMode;
   assisted: boolean;
   model: string;
@@ -324,6 +405,7 @@ export default function Chat({
   onDetach: (path: string) => void;
   onSend: (text: string) => void;
   onAnswer: (approved: boolean) => void;
+  onReply: (answer: string | null) => void;
   onWorkspace: (path: string) => void;
   onCancel: () => void;
   onMode: (mode: PermissionMode) => void;
@@ -558,6 +640,8 @@ export default function Chat({
           </button>
         )}
       </div>
+
+      {question && <QuestionPanel question={question} onReply={onReply} />}
 
       {pending && (
         <div className="approval">

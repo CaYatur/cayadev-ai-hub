@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
+pub mod ask;
 pub mod github;
 pub mod media;
 pub mod search;
@@ -53,6 +54,9 @@ pub struct WorkspaceTools {
     web: web::WebTools,
     /// Where `run_command` sends output while a command is still running.
     progress: Option<mpsc::Sender<String>>,
+    /// Where `ask_user` puts its question. `None` outside the app — a test
+    /// harness has nobody to ask, so the tool is not advertised.
+    asker: Option<std::sync::Arc<dyn ask::Asker>>,
 }
 
 impl WorkspaceTools {
@@ -69,6 +73,7 @@ impl WorkspaceTools {
             media: None,
             web: web::WebTools::new(),
             progress: None,
+            asker: None,
         }
     }
 
@@ -91,6 +96,16 @@ impl WorkspaceTools {
         self
     }
 
+    /// Let the agent put a question to the user.
+    ///
+    /// Without this the tool is not advertised at all: offering a model a way
+    /// to ask a question that nobody will ever see is worse than not having it,
+    /// because the run stops dead waiting for an answer.
+    pub fn with_asker(mut self, asker: std::sync::Arc<dyn ask::Asker>) -> Self {
+        self.asker = Some(asker);
+        self
+    }
+
     /// Build a tool surface that never actually executes commands.
     pub fn dry_run(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
@@ -102,6 +117,7 @@ impl WorkspaceTools {
             media: None,
             web: web::WebTools::new(),
             progress: None,
+            asker: None,
         }
     }
 
@@ -116,6 +132,7 @@ impl WorkspaceTools {
             media: None,
             web: web::WebTools::new(),
             progress: None,
+            asker: None,
         }
     }
 
@@ -342,6 +359,30 @@ impl ToolExecutor for WorkspaceTools {
         }
         tools.extend(web::WebTools::schemas());
         tools.extend(search::schemas());
+        if self.asker.is_some() {
+            tools.push(Tool::function(
+                "ask_user",
+                "Ask the user a question and wait for their answer. Use this when a \
+                 choice is theirs to make — which file they meant, which approach they \
+                 want, a detail you were not given — instead of guessing.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "What to ask, in one sentence"},
+                        "options": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Choices to offer. Leave out for a written answer."
+                        },
+                        "multiple": {
+                            "type": "boolean",
+                            "description": "Whether more than one option may be picked"
+                        }
+                    },
+                    "required": ["question"]
+                }),
+            ));
+        }
         tools
     }
 
@@ -349,6 +390,9 @@ impl ToolExecutor for WorkspaceTools {
         let path = || Self::arg_str(args, "path").map(|p| self.resolve(&p));
 
         match name {
+            // Asking a question changes nothing, reads nothing, and sends
+            // nothing anywhere. There is no decision for the engine to make.
+            "ask_user" => Some(Action::AskUser),
             "read_file" => Some(Action::ReadFile { path: path()? }),
             "write_file" | "edit_file" => Some(Action::WriteFile { path: path()? }),
             "list_dir" => Some(Action::ListDir { path: path()? }),
@@ -376,6 +420,20 @@ impl ToolExecutor for WorkspaceTools {
 
     async fn execute(&self, name: &str, args: &Map<String, Value>) -> Result<String, String> {
         match name {
+            "ask_user" => {
+                let asker = self.asker.as_ref().ok_or("there is nobody to ask")?;
+                let question = Self::arg_str(args, "question").ok_or("missing `question`")?;
+                let answer = asker
+                    .ask(ask::Question {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        question,
+                        options: ask::options_from(args.get("options")),
+                        multiple: args.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                    .await;
+                Ok(answer.as_tool_output())
+            }
+
             "read_file" => {
                 let raw = Self::arg_str(args, "path").ok_or("missing `path`")?;
                 let path = self.resolve(&raw);

@@ -143,5 +143,13 @@
     "denied": "refused",
     "failed": "failed",
     "waiting": "waiting"
+  },
+  "ask": {
+    "title": "The agent is asking",
+    "skip": "Skip",
+    "send": "Answer",
+    "orWrite": "Or write your own answer…",
+    "writePlaceholder": "Your answer…",
+    "skippedNotice": "Question skipped."
   }
 }
