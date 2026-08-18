@@ -61,14 +61,18 @@ impl PromptTier {
     /// schemas (files, GitHub, documents, images, devices, web), far past what
     /// a 0.5B can choose between.
     ///
-    /// These numbers are judgement, not measurement: 12 was chosen to hold the
-    /// core tools plus one capability from each family. The live tests confirm
-    /// a 7B still finishes a task at 12 and a 0.5B still produces usable calls
-    /// at 5; where either actually degrades has not been measured.
+    /// The Compact number is measured: `scripts/drift.py` offers exactly this
+    /// surface to qwen2.5-coder:7b and it still makes zero false tool calls on
+    /// eight conversational inputs while missing none of eight tasks. It holds
+    /// the core tools, both web tools, both attachment tools, the screen, and
+    /// four GitHub tools — one capability from every family the app has.
+    ///
+    /// The Minimal number is judgement: a 0.5B still produces usable calls at
+    /// five, and where it actually degrades has not been measured.
     pub fn tool_budget(&self) -> usize {
         match self {
             Self::Minimal => 6,
-            Self::Compact => 13,
+            Self::Compact => 15,
             Self::Full => usize::MAX,
         }
     }
@@ -101,14 +105,18 @@ const PRIORITY_TOOLS: &[&str] = &[
     // Research, and the most common reason to reach outside the project.
     "web_search",
     "web_read",
-    // Attachments the user drops into a task.
+    // Attachments the user drops into a task. Images before documents is
+    // deliberate: dragging a screenshot into the box is the common case.
+    "view_image",
     "read_document",
+    // Looking at the user's screen. Without this a trimmed surface leaves the
+    // model answering "I can't see your screen" to a question it has a tool for.
+    "screenshot",
     // The GitHub tools that carry the most work per call.
     "gh_status",
     "gh_diff",
     "gh_open_pr",
     "gh_commit",
-    "view_image",
 ];
 
 /// Trim the tool list to what the model can actually choose between.
@@ -165,19 +173,28 @@ pub fn system_prompt(tier: PromptTier, workspace: &str, tools: &[Tool]) -> Strin
                  Use only the tool names you were given. Never invent one.\n",
             );
         }
-        // The "tools are for acting on the project" framing is measured, not
-        // guessed: `scripts/drift.py` put the previous wording at five false
-        // tool calls out of eight greetings on qwen2.5-coder:7b — every one of
-        // them a `web_search` for the word "hello" — and this at zero, with no
-        // loss on the task prompts.
+        // Both of these are measured with `scripts/drift.py`, not guessed.
+        //
+        // "Tools are for acting on the project. Most messages are not that."
+        // took false tool calls on greetings from six out of eight to zero on
+        // qwen2.5-coder:7b — every one of them a `web_search` for the word
+        // "hello".
+        //
+        // But "specific in this project" was too narrow, and models quoted it
+        // back: asked "bilgisayarımın ekranında şuanda ne açık?" with
+        // `screenshot` in its tool list, gpt-oss:20b reasoned that this was a
+        // general question and answered that it has no access to the screen.
+        // Naming what else counts as specific — the screen, a page, a phone —
+        // fixes that case and still measures zero false calls on the 7B.
         PromptTier::Compact => {
             out.push_str(
                 "You are a coding assistant working in a local project.\n\n\
                  Tools are for acting on the project. Most messages are not that.\n\
                  - If the user is greeting you, thanking you, or asking a general \
                  question, just reply. Do not call a tool.\n\
-                 - Call a tool only when asked to look at or change something \
-                 specific in this project.\n\
+                 - Call a tool when asked to look at or change something specific: \
+                 a file here, the screen, a web page, a connected phone.\n\
+                 - Never say you cannot see something you have a tool for.\n\
                  - Read a file before editing it. Never guess its contents.\n\
                  - One tool at a time. Wait for the result.\n\
                  - Keep replies short. No preamble.\n",
@@ -189,12 +206,15 @@ pub fn system_prompt(tier: PromptTier, workspace: &str, tools: &[Tool]) -> Strin
                  Tools are for acting on the project. Most messages are not that.\n\
                  - If the user is greeting you, thanking you, or asking a general \
                  question, just reply. Do not call a tool.\n\
-                 - Call a tool only when asked to look at or change something \
-                 specific in this project.\n\n\
+                 - Call a tool when asked to look at or change something specific: \
+                 a file here, the screen, a web page, a connected phone.\n\
+                 - Never say you cannot see something you have a tool for.\n\n\
                  Approach:\n\
                  - Read before you write. Inspect the file, then make the edit.\n\
                  - Prefer the smallest change that solves the problem.\n\
                  - Match the surrounding code's style, naming, and comment density.\n\
+                 - There is no tool for making an image, a sound or a video, but you \
+                 can write a script and run it. Say you cannot only after that fails.\n\
                  - One tool at a time. Wait for its result before deciding the next step.\n\
                  - If a tool fails, read the error and adapt. Do not retry the same call unchanged.\n\n\
                  Output:\n\

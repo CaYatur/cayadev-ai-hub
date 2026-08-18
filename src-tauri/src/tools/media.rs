@@ -210,7 +210,7 @@ impl MediaTools {
             ));
             tools.push(Tool::function(
                 "screenshot",
-                "Capture the screen and answer a question about what is on it.",
+                "Take a picture of the user's own computer screen right now and                  answer a question about it. Use this whenever the user asks what                  is on their screen or what they are looking at.",
                 json!({
                     "type": "object",
                     "properties": {"question": {"type": "string", "description": "What to look for"}}

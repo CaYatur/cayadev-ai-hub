@@ -39,6 +39,19 @@ TASKS = [
     "What is in the file README.md?",
 ]
 
+# Things that need a tool but are not "in this project".
+#
+# These are the ones the shipped wording gets wrong. Asked what was on their
+# screen, the model quoted the system prompt back in its reasoning — "this is a
+# general question" — and answered that it has no access, with `screenshot`
+# sitting in its tool list. Same shape for the web and for a phone.
+WORLD = [
+    "bilgisayarımın ekranında şuanda ne açık?",
+    "what is on my screen right now?",
+    "look up the latest version of tokio and tell me the number",
+    "read https://example.com and summarise it",
+]
+
 # The surface `run_agent` advertises, trimmed the way Compact tier trims it.
 TOOLS = [
     ("read_file", "Read a file's contents.", ["path"]),
@@ -53,6 +66,10 @@ TOOLS = [
     ("gh_diff", "Uncommitted changes, or a pull request's diff.", []),
     ("gh_open_pr", "Branch, commit, push, and open a pull request.", ["title", "body"]),
     ("view_image", "Look at an image and answer a question about it.", ["path"]),
+    ("gh_commit", "Stage and commit the current changes.", ["message"]),
+    ("screenshot", "Take a picture of the user's own computer screen right now and "
+                   "answer a question about it.", []),
+    ("adb", "Run an action against a connected Android phone.", ["action"]),
 ]
 
 
@@ -88,6 +105,37 @@ PROMPTS = {
         "just reply. Do not call a tool.\n"
         "- Call a tool only when the user asked you to look at or change something "
         "specific in this project.\n"
+        "- Read a file before editing it. Never guess its contents.\n"
+        "- One tool at a time. Wait for the result.\n"
+        "- Keep replies short. No preamble.\n"
+    ),
+    # What the failures point at: the shipped wording reads "not about a file in
+    # this folder" as "no tool", so the screen, the web and a connected phone
+    # all fall through to "I don't have access".
+    "reach_outside": (
+        "You are a coding assistant working in a local project.\n\n"
+        "Answer from what you know. Use a tool to reach something you cannot "
+        "know: a file, the web, the screen, a device.\n"
+        "- Greetings, thanks, and questions about programming in general -> "
+        "just reply. Do not call a tool.\n"
+        "- Anything about this project, the user's screen, a web page, or a "
+        "connected phone -> call the tool for it. Never say you have no access "
+        "to something you have a tool for.\n"
+        "- Read a file before editing it. Never guess its contents.\n"
+        "- One tool at a time. Wait for the result.\n"
+        "- Keep replies short. No preamble.\n"
+    ),
+    # `answer_first` with one clause changed and one line added: the smallest
+    # delta from the wording that measured 0/8, aimed only at the case it gets
+    # wrong.
+    "answer_first_world": (
+        "You are a coding assistant working in a local project.\n\n"
+        "Tools are for acting on the project. Most messages are not that.\n"
+        "- If the user is greeting you, thanking you, or asking a general "
+        "question, just reply. Do not call a tool.\n"
+        "- Call a tool when asked to look at or change something specific: a "
+        "file here, the screen, a web page, a connected phone.\n"
+        "- Never say you cannot see something you have a tool for.\n"
         "- Read a file before editing it. Never guess its contents.\n"
         "- One tool at a time. Wait for the result.\n"
         "- Keep replies short. No preamble.\n"
@@ -158,13 +206,14 @@ def evaluate(model, label, system):
             false_calls.append((message, preview))
 
     missed = []
-    for message in TASKS:
+    for message in TASKS + WORLD:
         called, preview = called_a_tool(model, system, message)
         if called is False:
             missed.append((message, preview))
 
+    total_tasks = len(TASKS) + len(WORLD)
     print(f"\n[{label}] false calls {len(false_calls)}/{len(CHAT)} "
-          f"· missed calls {len(missed)}/{len(TASKS)}")
+          f"· missed calls {len(missed)}/{total_tasks}")
     for message, preview in false_calls:
         print(f"    false: {message!r} -> {preview}")
     for message, preview in missed:
@@ -182,4 +231,5 @@ if __name__ == "__main__":
 
     print("\n=== summary (lower is better) ===")
     for label, (false_calls, missed) in results.items():
-        print(f"  {label:24s} false {false_calls}/{len(CHAT)}  missed {missed}/{len(TASKS)}")
+        print(f"  {label:24s} false {false_calls}/{len(CHAT)}  "
+              f"missed {missed}/{len(TASKS) + len(WORLD)}")
