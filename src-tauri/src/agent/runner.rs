@@ -25,6 +25,7 @@ use crate::ollama::client::{OllamaClient, StreamEvent};
 use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
+use super::context;
 use super::prompt::{compact_tools, select_tools, system_prompt, PromptTier};
 use super::toolcall::{extract, unknown_tool_name, Recovery};
 
@@ -187,11 +188,23 @@ impl AgentRunner {
         ];
 
         let mut signature_counts: HashMap<String, usize> = HashMap::new();
+        // One retry per run: a second stall is a real failure, not a full window.
+        let mut stalled_once = false;
 
         for step in 0..self.config.max_steps {
             if self.cancelled() {
                 let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
                 return StopReason::Cancelled;
+            }
+
+            // Trim before sending, not after overflowing. Ollama truncates
+            // from the front, which is where the system prompt and the task
+            // are — and then its template reports "no user query found".
+            if let Some(num_ctx) = self.config.num_ctx {
+                let dropped = context::fit(&mut messages, num_ctx);
+                if dropped > 0 {
+                    tracing::info!("dropped {dropped} messages to fit {num_ctx} tokens");
+                }
             }
 
             let request = ChatRequest {
@@ -233,6 +246,22 @@ impl AgentRunner {
                 Err(crate::ollama::OllamaError::Cancelled) => {
                     let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
                     return StopReason::Cancelled;
+                }
+                // A stall is usually the conversation having grown too long for
+                // the model to start producing. Trimming harder and retrying
+                // recovers it; failing the run loses the user's work.
+                Err(crate::ollama::OllamaError::Stalled { .. }) if !stalled_once => {
+                    stalled_once = true;
+                    if let Some(num_ctx) = self.config.num_ctx {
+                        context::fit(&mut messages, num_ctx / 2);
+                    }
+                    let _ = events
+                        .send(AgentEvent::Error {
+                            message: "The model stopped producing output. Trimming the                                       conversation and trying once more."
+                                .into(),
+                        })
+                        .await;
+                    continue;
                 }
                 Err(e) => {
                     let _ = events.send(AgentEvent::Error { message: e.to_string() }).await;
@@ -351,14 +380,39 @@ impl AgentRunner {
                 let outcome = match evaluation.decision {
                     Decision::Allow => Outcome::AutoApproved,
                     Decision::Deny => Outcome::Denied,
-                    Decision::Ask => gate.decide(&proposed).await,
+                    // Waiting on a human is unbounded, so Stop has to reach
+                    // into this too — otherwise cancelling an unanswered
+                    // prompt does nothing.
+                    Decision::Ask => tokio::select! {
+                        biased;
+                        _ = crate::ollama::client::cancelled(&self.cancel) => {
+                            let _ = events
+                                .send(AgentEvent::Done { reason: StopReason::Cancelled })
+                                .await;
+                            return StopReason::Cancelled;
+                        }
+                        answer = gate.decide(&proposed) => answer,
+                    },
                 };
 
                 let output = match outcome {
                     Outcome::AutoApproved | Outcome::UserApproved => {
-                        match tools.execute(&name, &args).await {
-                            Ok(out) => out,
-                            Err(e) => format!("Error: {e}"),
+                        // A build, a transcription, or a vision call is often the
+                        // longest part of a step, and Stop has to reach into it.
+                        let ran = tokio::select! {
+                            biased;
+                            _ = crate::ollama::client::cancelled(&self.cancel) => None,
+                            result = tools.execute(&name, &args) => Some(result),
+                        };
+                        match ran {
+                            None => {
+                                let _ = events
+                                    .send(AgentEvent::Done { reason: StopReason::Cancelled })
+                                    .await;
+                                return StopReason::Cancelled;
+                            }
+                            Some(Ok(out)) => out,
+                            Some(Err(e)) => format!("Error: {e}"),
                         }
                     }
                     Outcome::Denied => {

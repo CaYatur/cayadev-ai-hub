@@ -62,7 +62,7 @@ impl GitHubTools {
 
         let output = tokio::time::timeout(
             GH_TIMEOUT,
-            tokio::process::Command::new(program)
+            crate::proc::command(program)
                 .args(argv)
                 .current_dir(&self.workspace)
                 .stdout(Stdio::piped())

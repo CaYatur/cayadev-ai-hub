@@ -9,6 +9,7 @@ pub mod checkpoint;
 pub mod commands;
 pub mod ollama;
 pub mod perms;
+pub mod proc;
 pub mod session;
 pub mod tools;
 

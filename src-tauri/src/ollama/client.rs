@@ -45,6 +45,19 @@ pub enum OllamaError {
 
 pub type Result<T> = std::result::Result<T, OllamaError>;
 
+/// Resolve as soon as `cancel` is set.
+///
+/// Checking the flag only between chunks is not enough: the longest waits are
+/// the ones with nothing arriving — a cold model load, or a prefill on a
+/// spilled 27B — and those are exactly when a person reaches for Stop. Racing
+/// this against the read makes cancellation land within a tick instead of
+/// whenever the next token happens to show up.
+pub async fn cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+}
+
 /// Timeout budgets, all in seconds.
 #[derive(Debug, Clone)]
 pub struct Timeouts {
@@ -61,8 +74,10 @@ pub struct Timeouts {
 impl Default for Timeouts {
     fn default() -> Self {
         // 10 min covers a cold 27B load (~30 s) plus a long prefill with wide
-        // margin; 60 s between tokens is far beyond any healthy decode.
-        Self { connect: 5, first_token: 600, idle: 60 }
+        // margin. The inter-token budget is 180 s rather than 60 because a
+        // spilled 27B running at 4 tok/s with a full context pauses longer than
+        // expected between chunks, and cutting it there lost real work.
+        Self { connect: 5, first_token: 600, idle: 180 }
     }
 }
 
@@ -168,18 +183,38 @@ impl OllamaClient {
 
     /// Non-streaming chat. Used for short internal calls (routing, classifying)
     /// where incremental output has no value.
-    pub async fn chat(&self, mut req: ChatRequest) -> Result<ChatResponse> {
+    pub async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.chat_cancellable(req, &AtomicBool::new(false)).await
+    }
+
+    /// Non-streaming chat that gives up as soon as `cancel` is set.
+    ///
+    /// Used for the classifier and for vision calls, both of which can take
+    /// long enough on a busy GPU that a user presses Stop during one.
+    pub async fn chat_cancellable(
+        &self,
+        mut req: ChatRequest,
+        cancel: &AtomicBool,
+    ) -> Result<ChatResponse> {
         req.stream = false;
         let url = format!("{}/api/chat", self.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&req)
-            // A whole non-streaming turn still needs the first-token budget.
-            .timeout(Duration::from_secs(self.timeouts.first_token))
-            .send()
-            .await
-            .map_err(|e| OllamaError::Unreachable { url, source: e })?;
+
+        // Nothing streams back from a non-streaming call, so without racing the
+        // request there is no point at which Stop could be noticed.
+        let resp = tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(OllamaError::Cancelled),
+            sent = self
+                .http
+                .post(&url)
+                .json(&req)
+                // A whole non-streaming turn still needs the first-token budget.
+                .timeout(Duration::from_secs(self.timeouts.first_token))
+                .send() =>
+            {
+                sent.map_err(|e| OllamaError::Unreachable { url, source: e })?
+            }
+        };
 
         let status = resp.status();
         let text = resp.text().await?;
@@ -220,13 +255,13 @@ impl OllamaClient {
         let model = req.model.clone();
         let url = format!("{}/api/chat", self.base_url);
 
-        let resp = self
-            .http
-            .post(&url)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| OllamaError::Unreachable { url, source: e })?;
+        let resp = tokio::select! {
+            biased;
+            _ = cancelled(&cancel) => return Err(OllamaError::Cancelled),
+            sent = self.http.post(&url).json(&req).send() => {
+                sent.map_err(|e| OllamaError::Unreachable { url, source: e })?
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
@@ -244,13 +279,19 @@ impl OllamaClient {
         let started = Instant::now();
 
         loop {
-            if cancel.load(Ordering::Relaxed) {
-                // Dropping `stream` here closes the connection.
-                return Err(OllamaError::Cancelled);
-            }
             let budget = if seen_any { self.timeouts.idle } else { self.timeouts.first_token };
 
-            let next = tokio::time::timeout(Duration::from_secs(budget), stream.next()).await;
+            // `biased` so cancellation wins a tie rather than being subject to
+            // random branch order.
+            let next = tokio::select! {
+                biased;
+                _ = cancelled(&cancel) => {
+                    // Dropping `stream` here closes the connection, so the
+                    // daemon stops generating too.
+                    return Err(OllamaError::Cancelled);
+                }
+                read = tokio::time::timeout(Duration::from_secs(budget), stream.next()) => read,
+            };
 
             let chunk = match next {
                 Err(_) => {

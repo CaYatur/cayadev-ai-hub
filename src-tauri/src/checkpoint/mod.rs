@@ -11,19 +11,24 @@
 //! restored to an earlier state costs nothing new. A file that never changes is
 //! never stored twice.
 //!
-//! ## Why the store is refused to the agent
+//! ## Why the store is not in the project
 //!
-//! The store lives under the workspace, which is exactly where `ProjectAuto`
-//! auto-approves writes. Without a guard the agent could overwrite its own undo
-//! history — so [`crate::perms::path::is_checkpoint_store`] refuses the path in
-//! every mode, `Unrestricted` included.
+//! It used to be, at `.cayahub/`. The agent found it, read the app's own
+//! journal, and spent steps reasoning about it; it also turned up in `list_dir`,
+//! in searches, and in the user's git status. History now lives in a directory
+//! per workspace under the OS data directory, so a project looks exactly as the
+//! user left it.
+//!
+//! The old path is still refused to the agent — projects that already have a
+//! `.cayahub/` should not have it edited.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Directory name inside the workspace.
+/// Legacy directory name, still refused to the agent so older projects that
+/// have one are not edited by it.
 pub const STORE_DIR: &str = ".cayahub";
 
 /// Files larger than this are journalled as "not captured" rather than copied.
@@ -62,6 +67,17 @@ pub struct Checkpoint {
     pub files: Vec<FileSnapshot>,
 }
 
+/// Reduce a folder name to something safe to use as a directory name.
+fn sanitize(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .take(40)
+        .collect();
+    let trimmed = cleaned.trim_matches('-').to_string();
+    if trimmed.is_empty() { "workspace".into() } else { trimmed }
+}
+
 pub struct CheckpointStore {
     workspace: PathBuf,
 }
@@ -71,8 +87,28 @@ impl CheckpointStore {
         Self { workspace: workspace.into() }
     }
 
+    /// Where this workspace's history lives.
+    ///
+    /// Outside the project, deliberately. Keeping it in `.cayahub/` meant the
+    /// agent found it, read it, and spent steps reasoning about the app's own
+    /// journal — and it showed up in `list_dir`, in searches, and in the user's
+    /// git status. A directory per workspace under the OS data directory keeps
+    /// the project exactly as the user left it.
     pub fn store_root(&self) -> PathBuf {
-        self.workspace.join(STORE_DIR)
+        let key = format!("{:x}", Sha256::digest(self.workspace.to_string_lossy().as_bytes()));
+        let name = self
+            .workspace
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".into());
+
+        dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("cayadev-ai-hub")
+            .join("history")
+            // Name plus hash: readable when someone goes looking, unique when
+            // two projects share a name.
+            .join(format!("{}-{}", sanitize(&name), &key[..12]))
     }
 
     fn objects_dir(&self) -> PathBuf {
@@ -156,11 +192,14 @@ impl CheckpointStore {
         Ok(checkpoint.id)
     }
 
-    /// Keep the store out of the user's commits without them having to ask.
+    /// Record which project this history belongs to.
+    ///
+    /// The directory name is a hash, so without this a user cleaning up their
+    /// data folder has no way to tell what any of it is.
     fn ensure_ignored(&self) -> std::io::Result<()> {
-        let marker = self.store_root().join(".gitignore");
+        let marker = self.store_root().join("WORKSPACE");
         if !marker.exists() {
-            std::fs::write(&marker, "*\n")?;
+            std::fs::write(&marker, self.workspace.to_string_lossy().as_bytes())?;
         }
         Ok(())
     }
@@ -256,6 +295,27 @@ mod tests {
     }
 
     #[test]
+    fn the_store_is_outside_the_project() {
+        // The agent used to find `.cayahub/` and spend steps reading the app's
+        // own journal; it also showed up in searches and in git status.
+        let dir = scratch();
+        let store = CheckpointStore::new(&dir);
+        assert!(
+            !store.store_root().starts_with(&dir),
+            "history is still inside the project: {}",
+            store.store_root().display()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn two_projects_with_the_same_name_do_not_share_history() {
+        let a = CheckpointStore::new(std::env::temp_dir().join("alpha").join("app"));
+        let b = CheckpointStore::new(std::env::temp_dir().join("beta").join("app"));
+        assert_ne!(a.store_root(), b.store_root());
+    }
+
+    #[test]
     fn restores_previous_contents() {
         let dir = scratch();
         let store = CheckpointStore::new(&dir);
@@ -269,6 +329,7 @@ mod tests {
         store.restore(&id).unwrap();
 
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -287,6 +348,7 @@ mod tests {
         store.restore(&id).unwrap();
 
         assert!(!file.exists(), "undo of a creation should delete the file");
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -309,6 +371,7 @@ mod tests {
             .filter(|e| e.file_type().is_file())
             .collect();
         assert_eq!(objects.len(), 1, "deduplication failed");
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -325,6 +388,7 @@ mod tests {
         }
         assert_eq!(store.size_bytes(), "steady".len() as u64);
         assert_eq!(store.list().unwrap().len(), 20, "every step should be journalled");
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -343,18 +407,27 @@ mod tests {
         // Restoring must say so rather than silently doing nothing.
         let id = store.record("write_file big.bin", vec![snap]).unwrap();
         assert!(store.restore(&id).is_err());
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn the_store_ignores_itself_in_git() {
+    fn recording_leaves_the_project_untouched() {
+        // Not just "outside the workspace path" — nothing at all is written
+        // there, so `list_dir`, search and git status see the project exactly
+        // as the user left it.
         let dir = scratch();
         let store = CheckpointStore::new(&dir);
         store.record("noop", vec![]).unwrap();
+
+        assert!(store.journal_path().exists());
         assert_eq!(
-            std::fs::read_to_string(store.store_root().join(".gitignore")).unwrap(),
-            "*\n"
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "the project must look exactly as the user left it"
         );
+
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -374,6 +447,7 @@ mod tests {
         let all = store.list().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[1].label, "third");
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -382,6 +456,7 @@ mod tests {
         let dir = scratch();
         let store = CheckpointStore::new(&dir);
         assert!(store.restore("nope").is_err());
+        std::fs::remove_dir_all(store.store_root()).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

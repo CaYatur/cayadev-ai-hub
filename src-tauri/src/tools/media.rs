@@ -163,7 +163,7 @@ impl MediaTools {
     async fn run(&self, program: &str, argv: &[String]) -> Result<String, String> {
         let output = tokio::time::timeout(
             TOOL_TIMEOUT,
-            tokio::process::Command::new(program)
+            crate::proc::command(program)
                 .args(argv)
                 .current_dir(&self.workspace)
                 .stdout(Stdio::piped())
@@ -495,7 +495,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
              $bmp.Save('{}'); $g.Dispose(); $bmp.Dispose()",
             target.to_string_lossy().replace('\\', "\\\\")
         );
-        let status = tokio::process::Command::new("powershell")
+        let status = crate::proc::command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .await
@@ -507,7 +507,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
 
     #[cfg(target_os = "macos")]
     {
-        tokio::process::Command::new("screencapture")
+        crate::proc::command("screencapture")
             .args(["-x", &target.to_string_lossy()])
             .output()
             .await
@@ -516,7 +516,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        tokio::process::Command::new("import")
+        crate::proc::command("import")
             .args(["-window", "root", &target.to_string_lossy()])
             .output()
             .await
@@ -533,7 +533,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
 /// Is `program` on PATH?
 fn which(program: &str) -> bool {
     let probe = if cfg!(windows) { "where" } else { "which" };
-    std::process::Command::new(probe)
+    crate::proc::sync_command(probe)
         .arg(program)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -548,7 +548,7 @@ fn which(program: &str) -> bool {
 /// packages, and a machine may well have one and not the other.
 fn detect_transcriber() -> Option<String> {
     for candidate in ["python", "python3"] {
-        let ok = std::process::Command::new(candidate)
+        let ok = crate::proc::sync_command(candidate)
             .args(["-c", "import faster_whisper"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -569,7 +569,7 @@ fn detect_transcriber() -> Option<String> {
 /// moment, having already cost the model a step.
 fn detect_python() -> Option<String> {
     for candidate in ["python", "python3"] {
-        let ok = std::process::Command::new(candidate)
+        let ok = crate::proc::sync_command(candidate)
             .args(["-c", "import fitz, docx, openpyxl"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

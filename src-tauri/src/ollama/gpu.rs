@@ -10,8 +10,6 @@
 //! *actually* in use — the compositor, the browser, whatever else is running —
 //! plus a small margin, rather than a number chosen in advance.
 
-use std::process::Command;
-
 use super::registry::VramBudget;
 
 const MIB: u64 = 1024 * 1024;
@@ -34,7 +32,7 @@ pub fn probe() -> Option<VramBudget> {
 }
 
 fn probe_nvidia() -> Option<VramBudget> {
-    let output = Command::new("nvidia-smi")
+    let output = crate::proc::sync_command("nvidia-smi")
         .args([
             "--query-gpu=memory.total,memory.used",
             "--format=csv,noheader,nounits",

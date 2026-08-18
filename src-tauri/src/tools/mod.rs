@@ -138,7 +138,7 @@ impl WorkspaceTools {
     /// the user sees progress while the model still gets the whole thing at the
     /// end — the transcript needs the complete output, the person needs it now.
     async fn run_streaming(&self, program: &str, argv: &[String]) -> Result<String, String> {
-        let mut child = tokio::process::Command::new(program)
+        let mut child = crate::proc::command(program)
             .args(argv)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())
