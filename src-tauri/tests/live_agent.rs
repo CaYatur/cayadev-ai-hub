@@ -818,15 +818,19 @@ async fn a_slow_model_writing_a_long_file_is_not_cut_off() {
 
     let mut tools = WorkspaceTools::new(&dir);
     let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
-    let paced = client().with_timeouts(Timeouts::for_throughput(5.4));
+    // The window the app actually offers this model, not a convenient small one.
+    const CTX: u32 = 65_536;
+    let paced = client()
+        .with_timeouts(Timeouts::for_generation(5.4, cayadev_ai_hub_lib::ollama::reply_budget(Some(CTX))));
     let runner = AgentRunner::new(
         paced,
         perms,
         RunConfig {
             model: SPILLED.into(),
             max_steps: 4,
-            num_ctx: Some(16384),
+            num_ctx: Some(CTX),
             params_billions: Some(27.0),
+            think: true,
             ..Default::default()
         },
     );
@@ -857,8 +861,8 @@ async fn a_slow_model_writing_a_long_file_is_not_cut_off() {
 
     let reason = runner
         .run(
-            "Write a single-file HTML page introducing yourself to intro.html. \
-             At least 120 lines, with inline CSS. Use write_file.",
+            // Word for word what was asked when this failed, twice.
+            "Kendi kendi tasarim dilini ve kendi model bilgilerini kullanarak kendini              tanitan single file html dosyasi olustur. Bu sayfanin icerigi senin              hakkinda olmali ve icerik kararlarini senin vermen gerek.",
             &mut tools,
             &AutoApprove,
             tx,
@@ -877,7 +881,12 @@ async fn a_slow_model_writing_a_long_file_is_not_cut_off() {
         "no file was written: {:?}",
         t.tools_called
     );
-    assert!(dir.join("intro.html").exists(), "intro.html is missing");
+    assert!(
+        std::fs::read_dir(&dir).unwrap().any(|e| {
+            e.map(|e| e.path().extension().is_some_and(|x| x == "html")).unwrap_or(false)
+        }),
+        "no HTML file was written"
+    );
     // The point of the heartbeat: a silence this long has to be visible while
     // it happens, not explained afterwards.
     assert!(longest_silence >= 30, "a long silence was never reported to the UI");

@@ -356,8 +356,9 @@ pub async fn run_agent(
     // A resident 7B that says nothing for three minutes is broken; a spilled
     // 27B that says nothing for nine is writing a file — measured, and the
     // fixed budget was cutting it off.
-    let paced = state.client.with_timeouts(Timeouts::for_throughput(
+    let paced = state.client.with_timeouts(Timeouts::for_generation(
         profile.map(|p| p.expected_decode_tps()).unwrap_or(20.0),
+        crate::ollama::reply_budget(Some(context)),
     ));
 
     let runner = AgentRunner::new(

@@ -10,12 +10,18 @@ everything else is not built yet, however well specified it looks.
 - Streaming chat with **idle-based timeouts** — a first-token budget covering
   model load and prefill, and a separate inter-token budget — rather than a
   total-request timeout that kills a legitimately slow prefill
-- **Budgets sized to the model, in work rather than time.** Some templates send
-  a whole tool call in one piece: `qwen3.8:27b` streams its reasoning, then goes
-  silent for **547 seconds** while it writes a file, and a fixed budget read
-  that as a stall. The budget is now the time to produce four thousand tokens at
-  whatever rate this model manages — measured after the first step, estimated
-  from placement before it
+- **Budgets bounded by what the model may produce, not by a guess.** Some
+  templates send a whole tool call in one piece: `qwen3.8:27b` streams its
+  reasoning, then goes silent for **547 seconds** while it writes a file. A
+  fixed budget read that as a stall, and so did a larger fixed budget. The reply
+  is now capped with an explicit `num_predict`, which makes the longest legal
+  silence a calculation rather than a constant: the cap divided by the rate this
+  model actually decodes at — measured after the first step, estimated from
+  placement before it
+- A **daemon liveness check** during long silences. Ollama cannot be asked
+  whether it is generating, but it can be asked whether the model is loaded, and
+  during a request it must be; if it has gone, the run fails at once instead of
+  waiting out the budget
 - A **heartbeat during silence**, so a model loading or writing says so instead
   of looking hung
 - Cancellation that reaches an in-flight stream, not only the gaps between steps

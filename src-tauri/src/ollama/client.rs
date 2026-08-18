@@ -86,47 +86,79 @@ impl Default for Timeouts {
 /// channel during a ten-minute generation.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 
+/// Silence tolerated before the daemon is checked at all.
+///
+/// Short gaps are ordinary. Asking about every one of them would put an HTTP
+/// request between every few tokens of a slow model.
+const LIVENESS_AFTER: Duration = Duration::from_secs(60);
+
+/// Seconds between those checks once they start.
+const LIVENESS_EVERY: u64 = 60;
+
 impl Timeouts {
-    /// Budgets scaled to how fast the model actually runs.
+    /// Budgets that cover the longest reply this model is allowed to produce.
+    ///
+    /// A silence is not evidence of failure. Some templates buffer a whole tool
+    /// call and send it in one piece — measured on `qwen3.8:27b-mtp-q4_K_M`,
+    /// which streams its reasoning and then says nothing at all while it writes
+    /// the file. So the question is not "how long is too long" but "how long
+    /// *can* this legitimately take", and that has an exact answer: the reply
+    /// is capped at `max_tokens`, and the model decodes at `tokens_per_second`.
+    ///
+    /// Guessing a constant instead does not work. 4096 tokens' worth was tried
+    /// and the same model was still cut off at 623 s, because nothing bounded
+    /// how much it could generate — without an explicit `num_predict` a reply
+    /// may run until the context window fills, which at 65k tokens and 5.7
+    /// tok/s is over three hours.
     ///
     /// `tokens_per_second` is what the model was measured at, or an estimate
-    /// from its placement. This exists because one number cannot serve both
-    /// ends of the range: `qwen2.5-coder:7b` decodes at 42 tok/s and a
-    /// three-minute silence from it means something is broken, while
-    /// `qwen3.8:27b` spilled to system RAM decodes at 5.4 and a single long
-    /// reply is a quarter of an hour of work — during which a fixed 180 s
-    /// budget cut it off and lost everything it had done.
-    ///
-    /// The idle budget is the time to produce [`STALL_TOKENS`] tokens at that
-    /// rate: enough that a working model is never mistaken for a dead one, and
-    /// short enough that a genuinely dead connection is still noticed.
-    pub fn for_throughput(tokens_per_second: f64) -> Self {
-        /// Tokens' worth of silence tolerated before calling it a stall.
-        ///
-        /// The unit is work, not time, because the silence is not really "no
-        /// tokens" — it is tokens being generated and not sent. Measured on
-        /// `qwen3.8:27b-mtp-q4_K_M`: reasoning streams normally, then the whole
-        /// tool call is buffered and arrives as one chunk. Asked for a
-        /// single-file HTML page it went **547 seconds** between the last
-        /// reasoning chunk and that one, and a 180 s budget threw the work away
-        /// twice. 4096 covers a long file written in one call.
-        const STALL_TOKENS: f64 = 4096.0;
+    /// from its placement. The spread is the reason this is a function at all:
+    /// `qwen2.5-coder:7b` decodes at 42 tok/s and three minutes of silence from
+    /// it means something is broken, while the same silence from a 27B running
+    /// out of system RAM is a third of one reply.
+    pub fn for_generation(tokens_per_second: f64, max_tokens: u32) -> Self {
+        /// Slack over the theoretical worst case. Decode rate is not constant —
+        /// a busy card halves it — and being slightly generous costs a wait,
+        /// while being slightly tight costs the work.
+        const MARGIN: f64 = 1.4;
         /// Never shorter than this, however fast the model is.
         const MIN_IDLE: u64 = 180;
-        /// Never longer than this, however slow: past half an hour of silence
-        /// the run is not worth holding open.
-        const MAX_IDLE: u64 = 1800;
+        /// Never longer than this. At the point where a single reply would take
+        /// an hour, the model is the wrong one for the machine and saying so is
+        /// more use than waiting.
+        const MAX_IDLE: u64 = 2400;
 
         let rate = tokens_per_second.max(0.5);
-        let idle = (STALL_TOKENS / rate).round() as u64;
+        let idle = (f64::from(max_tokens) / rate * MARGIN).round() as u64;
         Self {
             connect: 5,
-            // Loading 17 GB of weights from disk and prefilling a full window
-            // is minutes on a spilled model, and it is not a failure.
+            // Loading 17 GB of weights from disk and prefilling a full window is
+            // minutes on a spilled model, and it is not a failure. Measured at
+            // 424 s for a cold load plus 300 tokens.
             first_token: 900,
             idle: idle.clamp(MIN_IDLE, MAX_IDLE),
         }
     }
+}
+
+/// The reply length to allow, given the window.
+///
+/// Bounding this is what makes a silence measurable at all — with no cap a
+/// reply may run until the context fills. It also has to be generous: a
+/// truncated tool call comes back as *nothing*. Measured on
+/// `qwen3.8:27b-mtp-q4_K_M` with `num_predict: 300`: `done_reason: "length"`,
+/// `eval_count: 300`, and no content, no reasoning and no tool call at all —
+/// the half-written call is discarded rather than repaired. So the cap has to
+/// sit above any file the model would realistically write in one go; a
+/// 199-line HTML page measured about 2500 tokens.
+pub fn reply_budget(num_ctx: Option<u32>) -> u32 {
+    /// Enough for a long single-file page with inline styles.
+    const MAX_REPLY: u32 = 8192;
+    /// Below this the cap starts truncating ordinary work.
+    const MIN_REPLY: u32 = 1024;
+
+    // Half the window, so the conversation still has room to be sent.
+    num_ctx.map_or(MAX_REPLY, |ctx| (ctx / 2).clamp(MIN_REPLY, MAX_REPLY))
 }
 
 /// One event from a streaming chat turn.
@@ -371,6 +403,29 @@ impl OllamaClient {
                         if quiet >= budget {
                             break None;
                         }
+                        // Waiting out the whole budget is right when the model
+                        // is working and wrong when the daemon has gone. It
+                        // cannot be asked whether it is generating — a loaded
+                        // model looks the same either way — but it can be asked
+                        // whether the model is loaded at all, and while a
+                        // request is in flight it must be. If it has vanished,
+                        // waiting another twenty minutes proves nothing.
+                        if quiet >= LIVENESS_AFTER.as_secs() && quiet % LIVENESS_EVERY == 0 {
+                            if let Ok(ps) = self.ps().await {
+                                if !ps.models.iter().any(|m| m.name == model) {
+                                    let _ = tx
+                                        .send(StreamEvent::Error {
+                                            message: format!(
+                                                "The daemon no longer has {model} loaded, so \
+                                                 nothing is generating. It was probably \
+                                                 unloaded to make room, or the daemon restarted."
+                                            ),
+                                        })
+                                        .await;
+                                    return Err(OllamaError::Stalled { seconds: quiet, model });
+                                }
+                            }
+                        }
                         let _ = tx
                             .send(StreamEvent::Silence { seconds: quiet, first_token: !seen_any })
                             .await;
@@ -481,36 +536,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_spilled_model_gets_the_silence_it_actually_needs() {
-        // The measured failure: qwen3.8:27b spilled to system RAM decodes at
-        // 5.4 tok/s and went 547 seconds between its last reasoning chunk and
-        // the buffered tool call carrying a whole HTML file. A budget under
-        // that throws the work away.
-        let t = Timeouts::for_throughput(5.4);
-        assert!(t.idle > 547, "budget {} would have cut off a real run", t.idle);
+    fn the_budget_covers_the_longest_reply_the_model_may_produce() {
+        // The failure this exists to prevent, twice over. qwen3.8:27b decodes
+        // at ~5.7 tok/s from system RAM; a 623 s budget cut it off mid-file
+        // because nothing said how long the file could get.
+        let cap = reply_budget(Some(65_536));
+        let t = Timeouts::for_generation(5.7, cap);
+        let worst_case = (f64::from(cap) / 5.7) as u64;
+        assert!(
+            t.idle > worst_case,
+            "budget {} is shorter than the {worst_case}s the model is allowed to take",
+            t.idle
+        );
     }
 
     #[test]
     fn a_resident_model_is_not_given_a_quarter_of_an_hour() {
-        // At 42 tok/s a three-minute silence is a fault, not work in progress.
-        let t = Timeouts::for_throughput(42.3);
-        assert_eq!(t.idle, 180);
+        // At 42 tok/s the whole allowance decodes in about three minutes, and
+        // silence past that really is a fault.
+        let t = Timeouts::for_generation(42.3, reply_budget(Some(32_768)));
+        assert!(t.idle <= 300, "budget {} is far longer than this model needs", t.idle);
     }
 
     #[test]
     fn the_budget_is_bounded_at_both_ends() {
         // A nonsensical rate must not produce a zero budget or an endless one.
-        assert_eq!(Timeouts::for_throughput(0.0).idle, 1800);
-        assert_eq!(Timeouts::for_throughput(-5.0).idle, 1800);
-        assert_eq!(Timeouts::for_throughput(f64::MAX).idle, 180);
-        assert!(Timeouts::for_throughput(1.0).idle <= 1800);
+        assert_eq!(Timeouts::for_generation(0.0, 8192).idle, 2400);
+        assert_eq!(Timeouts::for_generation(-5.0, 8192).idle, 2400);
+        assert_eq!(Timeouts::for_generation(f64::MAX, 8192).idle, 180);
     }
 
     #[test]
     fn slower_models_always_get_at_least_as_long() {
         let mut previous = 0;
         for rate in [200.0, 60.0, 40.0, 20.0, 10.0, 5.0, 2.0, 1.0] {
-            let idle = Timeouts::for_throughput(rate).idle;
+            let idle = Timeouts::for_generation(rate, 8192).idle;
             assert!(idle >= previous, "{rate} tok/s got {idle}s, less than a faster model");
             previous = idle;
         }
@@ -518,8 +578,26 @@ mod tests {
 
     #[test]
     fn loading_a_large_model_is_never_the_thing_that_fails() {
-        // Weights come off disk once per run at worst; fifteen minutes covers a
-        // 17 GB model and a full prefill.
-        assert!(Timeouts::for_throughput(5.0).first_token >= 900);
+        // Measured: a cold 17 GB load plus 300 tokens took 424 s.
+        assert!(Timeouts::for_generation(5.0, 8192).first_token >= 900);
+    }
+
+    #[test]
+    fn the_reply_cap_leaves_room_for_the_conversation() {
+        // Half the window, so what is sent and what comes back both fit.
+        assert_eq!(reply_budget(Some(32_768)), 8192);
+        assert_eq!(reply_budget(Some(16_384)), 8192);
+        assert_eq!(reply_budget(Some(8_192)), 4096);
+        assert!(reply_budget(Some(8_192)) < 8_192);
+    }
+
+    #[test]
+    fn the_reply_cap_never_gets_small_enough_to_truncate_ordinary_work() {
+        // A truncated tool call comes back as nothing at all — measured with
+        // `num_predict: 300`, which returned no content, no reasoning and no
+        // call. Cutting a reply short is worse than taking a while.
+        assert_eq!(reply_budget(Some(512)), 1024);
+        assert_eq!(reply_budget(Some(1)), 1024);
+        assert_eq!(reply_budget(None), 8192);
     }
 }

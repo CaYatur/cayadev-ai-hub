@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::ollama::client::{OllamaClient, StreamEvent};
+use crate::ollama::client::{reply_budget, OllamaClient, StreamEvent};
 use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
@@ -271,7 +271,14 @@ impl AgentRunner {
                 tools: (!schemas.is_empty()).then(|| schemas.clone()),
                 think: self.config.think.then_some(true),
                 format: None,
-                options: Some(Options { num_ctx: self.config.num_ctx, ..Default::default() }),
+                options: Some(Options {
+                    num_ctx: self.config.num_ctx,
+                    // Capped so the wait for a silent model is bounded by
+                    // something real rather than by a guess. See
+                    // `ollama::reply_budget`.
+                    num_predict: Some(reply_budget(self.config.num_ctx) as i32),
+                    ..Default::default()
+                }),
                 keep_alive: Some(self.config.keep_alive.clone()),
             };
 
@@ -307,20 +314,29 @@ impl AgentRunner {
                     let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
                     return StopReason::Cancelled;
                 }
-                // A stall is usually the conversation having grown too long for
-                // the model to start producing. Trimming harder and retrying
-                // recovers it; failing the run loses the user's work.
+                // A stall is one of two things, and they want different
+                // handling. Before any output, it is usually the conversation
+                // having grown too long for the model to start producing, and
+                // trimming recovers it. After output has already streamed, the
+                // conversation is demonstrably fine — the model was generating
+                // and did not finish in time — so trimming would only make the
+                // retry say something different for no reason.
                 Err(crate::ollama::OllamaError::Stalled { .. }) if !stalled_once => {
                     stalled_once = true;
-                    if let Some(num_ctx) = self.config.num_ctx {
-                        task = context::fit(&mut messages, num_ctx / 2, task).task;
-                    }
-                    let _ = events
-                        .send(AgentEvent::Error {
-                            message: "The model stopped producing output. Trimming the                                       conversation and trying once more."
-                                .into(),
-                        })
-                        .await;
+                    let long = self
+                        .config
+                        .num_ctx
+                        .is_some_and(|ctx| context::total_tokens(&messages) > (ctx / 2) as usize);
+                    let message = if long {
+                        if let Some(num_ctx) = self.config.num_ctx {
+                            task = context::fit(&mut messages, num_ctx / 2, task).task;
+                        }
+                        "The model stopped producing output. Shortening the conversation \
+                         and trying once more."
+                    } else {
+                        "The model stopped producing output. Trying once more."
+                    };
+                    let _ = events.send(AgentEvent::Error { message: message.into() }).await;
                     continue;
                 }
                 Err(e) => {
@@ -334,6 +350,27 @@ impl AgentRunner {
             let _ = events
                 .send(AgentEvent::StepDone { step, metrics: response.metrics() })
                 .await;
+
+            // A reply cut off at the length cap comes back empty — measured on
+            // qwen3.8:27b with `num_predict: 300`: no content, no reasoning and
+            // no tool call, the half-written call simply discarded. Silently
+            // treating that as "the model had nothing to say" ends the run
+            // having done nothing, so it is named instead.
+            if response.done_reason.as_deref() == Some("length")
+                && assistant.content.trim().is_empty()
+                && assistant.tool_calls.as_ref().is_none_or(|c| c.is_empty())
+            {
+                let _ = events
+                    .send(AgentEvent::Error {
+                        message: format!(
+                            "The reply hit the {} token limit before the model finished,                              so nothing usable came back. Ask for a smaller piece of work,                              or raise the context window.",
+                            reply_budget(self.config.num_ctx)
+                        ),
+                    })
+                    .await;
+                let _ = events.send(AgentEvent::Done { reason: StopReason::Failed }).await;
+                return StopReason::Failed;
+            }
 
             let Some(found) = extract(&assistant.content, assistant.tool_calls.as_deref(), &known)
             else {

@@ -6,7 +6,7 @@ pub mod registry;
 pub mod types;
 
 pub use gpu::probe as probe_vram;
-pub use client::{OllamaClient, OllamaError, StreamEvent, Timeouts};
+pub use client::{reply_budget, OllamaClient, OllamaError, StreamEvent, Timeouts};
 pub use registry::{
     load_profiles, Capabilities, ModelProfile, Placement, RoutingPolicy, TaskClass, VramBudget,
 };
