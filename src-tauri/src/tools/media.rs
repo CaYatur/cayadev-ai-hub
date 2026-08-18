@@ -201,16 +201,17 @@ impl MediaTools {
             "read_document" | "view_image" => Some(Action::ReadFile {
                 path: self.resolve(&Self::arg(args, "path")?),
             }),
-            // Capturing the screen or a phone reads something outside the
-            // workspace, so it is a confirmation rather than a silent action.
-            "screenshot" => Some(Action::ReadFile {
-                path: PathBuf::from("<screen>"),
-            }),
-            "adb" => Some(Action::RunCommand {
-                program: "adb".into(),
-                args: vec![Self::arg(args, "action").unwrap_or_default()],
-                cwd: Some(self.workspace.clone()),
-            }),
+            "screenshot" => Some(Action::CaptureScreen { what: "this screen".into() }),
+            "adb" => match Self::arg(args, "action").unwrap_or_default().as_str() {
+                // Pulling a phone's screen is the same exposure as capturing
+                // this one, so it is confirmed the same way.
+                "screen" => Some(Action::CaptureScreen { what: "the device screen".into() }),
+                other => Some(Action::RunCommand {
+                    program: "adb".into(),
+                    args: vec![other.to_string()],
+                    cwd: Some(self.workspace.clone()),
+                }),
+            },
             _ => None,
         }
     }
@@ -451,6 +452,25 @@ mod tests {
             assert!(
                 t.action_for(name, &probe).is_some(),
                 "{name} has no Action and would bypass the permission engine"
+            );
+        }
+    }
+
+    #[test]
+    fn capturing_a_screen_is_never_silent() {
+        use crate::perms::{Decision, PermissionEngine, PermissionMode};
+        let t = tools(Some("qwen3-vl:8b"));
+        let engine = PermissionEngine::new(std::env::temp_dir(), PermissionMode::Unrestricted);
+
+        for (name, payload) in [
+            ("screenshot", json!({})),
+            ("adb", json!({"action": "screen"})),
+        ] {
+            let action = t.action_for(name, &args(payload)).unwrap();
+            assert_eq!(
+                engine.evaluate(&action).decision,
+                Decision::Ask,
+                "{name} must be confirmed before an image of a screen reaches a model"
             );
         }
     }

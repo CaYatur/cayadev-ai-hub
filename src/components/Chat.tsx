@@ -552,7 +552,7 @@ export default function Chat({
         </div>
 
         <div className="statusline">
-          <span className="status-mark">✳</span>
+          <span className="status-mark" aria-hidden="true">◷</span>
           <span>{formatElapsed(session.elapsedMs)}</span>
           <span className="sep">·</span>
           <span>{formatTokens(session.tokens)} {t("chat.used")}</span>

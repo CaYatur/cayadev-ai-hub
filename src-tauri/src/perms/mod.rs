@@ -121,6 +121,11 @@ pub enum Action {
     /// release, a push. Confirmed in every mode — `Unrestricted` means "do not
     /// interrupt me about my own machine", not "post as me without asking".
     Publish { summary: String },
+    /// Capturing a screen — this machine's or a connected device's — and
+    /// sending the image to a model. Confirmed in every mode: the frame
+    /// contains whatever else happened to be open, which the user did not
+    /// choose to share.
+    CaptureScreen { what: String },
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +167,11 @@ impl PermissionEngine {
             Action::DeleteFile { path } => self.eval_write(path, true),
             Action::RunCommand { program, args, cwd } => self.eval_command(program, args, cwd.as_deref()),
             Action::Network { url } => self.eval_network(url),
+            Action::CaptureScreen { what } => Evaluation::ask(
+                format!("Capture {what} and send the image to a model."),
+                CommandRisk::ReadOnly,
+                true,
+            ),
             Action::Publish { summary } => Evaluation::ask(
                 format!("{summary}. This is visible to other people."),
                 CommandRisk::Mutating,
@@ -467,6 +477,15 @@ mod tests {
             cwd: Some(workspace_root()),
         });
         assert_eq!(e.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn screen_capture_is_confirmed_even_in_unrestricted_mode() {
+        // The frame holds whatever else is open, which the user did not choose
+        // to share with a model.
+        let e = engine(PermissionMode::Unrestricted)
+            .evaluate(&Action::CaptureScreen { what: "this screen".into() });
+        assert_eq!(e.decision, Decision::Ask);
     }
 
     #[test]

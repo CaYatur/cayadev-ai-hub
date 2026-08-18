@@ -37,6 +37,9 @@ pub fn run() {
             commands::cancel_run,
             commands::run_agent,
             commands::context_options,
+            commands::checkpoint_list,
+            commands::checkpoint_restore,
+            commands::checkpoint_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

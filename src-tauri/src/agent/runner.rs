@@ -23,7 +23,7 @@ use crate::ollama::client::{OllamaClient, StreamEvent};
 use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
-use super::prompt::{compact_tools, system_prompt, PromptTier};
+use super::prompt::{compact_tools, select_tools, system_prompt, PromptTier};
 use super::toolcall::{extract, Recovery};
 
 /// Executes tool calls. Implemented by the real tool surface and by test doubles.
@@ -134,7 +134,8 @@ impl AgentRunner {
         events: mpsc::Sender<AgentEvent>,
     ) -> StopReason {
         let tier = PromptTier::for_params(self.config.params_billions);
-        let schemas = compact_tools(&tools.schemas(), tier);
+        // Trim to what this model can choose between, then shorten what is left.
+        let schemas = compact_tools(&select_tools(&tools.schemas(), tier), tier);
         let known: Vec<String> = schemas.iter().map(|t| t.function.name.clone()).collect();
 
         let workspace = self.perms.workspace().display().to_string();

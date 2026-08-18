@@ -17,6 +17,7 @@ use std::time::Duration;
 
 pub mod github;
 pub mod media;
+pub mod web;
 
 use crate::agent::runner::ToolExecutor;
 use crate::checkpoint::{ChangeKind, CheckpointStore};
@@ -45,6 +46,8 @@ pub struct WorkspaceTools {
     /// Document, image, and device tools. `None` until `with_media` is called,
     /// because they need an Ollama client to delegate vision to.
     media: Option<media::MediaTools>,
+    /// Search and page reading. Always available — they need nothing installed.
+    web: web::WebTools,
 }
 
 impl WorkspaceTools {
@@ -59,6 +62,7 @@ impl WorkspaceTools {
             workspace,
             dry_run: false,
             media: None,
+            web: web::WebTools::new(),
         }
     }
 
@@ -78,13 +82,27 @@ impl WorkspaceTools {
     /// Build a tool surface that never actually executes commands.
     pub fn dry_run(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        Self { workspace, dry_run: true, checkpoints: None, github: None, media: None }
+        Self {
+            workspace,
+            dry_run: true,
+            checkpoints: None,
+            github: None,
+            media: None,
+            web: web::WebTools::new(),
+        }
     }
 
     /// Build a tool surface with no undo history.
     pub fn without_checkpoints(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        Self { workspace, dry_run: false, checkpoints: None, github: None, media: None }
+        Self {
+            workspace,
+            dry_run: false,
+            checkpoints: None,
+            github: None,
+            media: None,
+            web: web::WebTools::new(),
+        }
     }
 
     /// Capture a file's prior state, labelled with the call that will change it.
@@ -239,6 +257,7 @@ impl ToolExecutor for WorkspaceTools {
         if let Some(media) = &self.media {
             tools.extend(media.schemas());
         }
+        tools.extend(web::WebTools::schemas());
         tools
     }
 
@@ -261,6 +280,7 @@ impl ToolExecutor for WorkspaceTools {
             other if other.starts_with("gh_") => {
                 github::action_for(other, args, &self.workspace)
             }
+            other if web::WebTools::handles(other) => web::WebTools::action_for(other, args),
             other => self.media.as_ref().and_then(|m| m.action_for(other, args)),
         }
     }
@@ -391,6 +411,8 @@ impl ToolExecutor for WorkspaceTools {
                 Some(gh) => gh.execute(other, args).await,
                 None => Err("this folder is not a git repository".into()),
             },
+
+            other if web::WebTools::handles(other) => self.web.execute(other, args).await,
 
             other => match &self.media {
                 Some(media) if media.handles(other) => media.execute(other, args).await,

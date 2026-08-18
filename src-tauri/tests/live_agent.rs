@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use cayadev_ai_hub_lib::agent::approver::{AssistedGate, ModelOracle};
+use cayadev_ai_hub_lib::agent::runner::ToolExecutor;
 use cayadev_ai_hub_lib::agent::runner::{
     AgentEvent, AgentRunner, ApprovalGate, ProposedCall, RunConfig, StopReason,
 };
@@ -221,6 +222,71 @@ async fn tiny_model_completes_a_single_step_task() {
         "run failed outright: {reason:?}"
     );
     assert!(!t.tools_called.is_empty(), "0.5B model never produced a usable tool call");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn small_models_survive_the_full_tool_surface() {
+    // The other tests build a 5-tool surface. `run_agent` builds the real one:
+    // files plus GitHub plus documents, images, and devices — around 21 schemas.
+    // That is exactly what `prompt.rs` warns breaks a small model, so it has to
+    // be exercised against one rather than assumed.
+    let dir = scratch("surface");
+    std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status().ok();
+    std::fs::write(dir.join("note.txt"), "green
+").unwrap();
+
+    let tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let advertised = tools.schemas().len();
+    println!("
+[surface] {advertised} tools advertised before trimming");
+    assert!(advertised > 12, "expected the full surface, got {advertised}");
+
+    let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: TINY.into(),
+            max_steps: 6,
+            num_ctx: Some(8192),
+            params_billions: Some(0.5),
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            if let AgentEvent::ToolProposed { call } = ev {
+                sink.lock().unwrap().push(call.name);
+            }
+        }
+    });
+
+    let reason = runner
+        .run("Read note.txt and say what colour it names.", &tools, &AutoApprove, tx)
+        .await;
+    let _ = drain.await;
+
+    let called = seen.lock().unwrap().clone();
+    println!("[surface] {reason:?}, tools called: {called:?}");
+
+    assert_ne!(reason, StopReason::Failed, "the run failed outright");
+    assert!(
+        !called.is_empty(),
+        "the 0.5B produced no usable tool call against the full surface"
+    );
+    // The trim should keep it among the file tools rather than sending it off
+    // into GitHub or device tools it has no use for here.
+    assert!(
+        called.iter().all(|n| !n.starts_with("gh_") && n != "adb"),
+        "trimming failed; the model reached for irrelevant tools: {called:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

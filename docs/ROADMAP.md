@@ -47,6 +47,13 @@ everything else is not built yet, however well specified it looks.
 - Credential paths and catastrophic commands refused in *every* mode, including
   unrestricted
 
+### Tool budgeting — `src-tauri/src/agent/prompt.rs`
+- The full surface is ~21 schemas (files, GitHub, documents, images, devices,
+  web). `select_tools` trims that to 5 for a Minimal-tier model and 12 for a
+  Compact one, always keeping the file tools
+- Verified live: the 0.5B was run against the full surface and completed using
+  `read_file`, without reaching for GitHub or device tools
+
 ### Agent loop — `src-tauri/src/agent/runner.rs`
 - Runs to completion against real models: 54-61 tok/s on `qwen2.5-coder:7b`
 - Schema validation before execution, naming the missing argument
@@ -98,6 +105,12 @@ everything else is not built yet, however well specified it looks.
   Unrestricted
 - Only advertised inside a git repository
 
+### Web — `src-tauri/src/tools/web.rs`
+- `web_search` over DuckDuckGo's HTML endpoint, so it works with no API key
+- `web_read` turns a page into readable text without adding an HTML parser
+- Everything returned is wrapped in an untrusted-content marker, and the
+  permission engine never consults page content when judging a later call
+
 ### Documents, images, devices — `src-tauri/src/tools/media.rs`
 - PDF, Word, Excel, PowerPoint via a Python sidecar; text and CSV in Rust
 - `view_image` and `screenshot` delegate to the routed vision model and return
@@ -133,13 +146,12 @@ everything else is not built yet, however well specified it looks.
 
 In dependency order.
 
-1. **Undo from the UI** — checkpoints are captured and restorable from Rust,
-   but no button surfaces them yet
-2. **Search tool** — content and filename search, which the agent currently
-   works around with `run_command`
-3. **Streamed command output** — long-running commands return only when they
+1. **Undo from the UI** — `checkpoint_list`, `checkpoint_restore`, and
+   `checkpoint_size` exist as commands; nothing in the interface calls them
+2. **Streamed command output** — long-running commands return only when they
    finish
-4. **Audio and video** — transcription and analysis are still unbuilt
+3. **Audio and video** — transcription and analysis are still unbuilt
+4. **Workspace search** — the agent works around it with `run_command`
 
 ## Later
 

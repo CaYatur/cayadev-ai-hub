@@ -324,3 +324,52 @@ pub async fn context_options(
         choices,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Checkpoints
+// ---------------------------------------------------------------------------
+
+/// Restorable points for the current workspace, newest first.
+#[tauri::command]
+pub async fn checkpoint_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::checkpoint::Checkpoint>, String> {
+    let workspace = state
+        .workspace
+        .read()
+        .await
+        .clone()
+        .ok_or("No workspace selected.")?;
+    let mut all = crate::checkpoint::CheckpointStore::new(workspace)
+        .list()
+        .map_err(|e| e.to_string())?;
+    all.reverse();
+    Ok(all)
+}
+
+/// Put the files in a checkpoint back to their captured contents.
+#[tauri::command]
+pub async fn checkpoint_restore(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let workspace = state
+        .workspace
+        .read()
+        .await
+        .clone()
+        .ok_or("No workspace selected.")?;
+    crate::checkpoint::CheckpointStore::new(workspace).restore(&id)
+}
+
+/// Bytes the undo history currently occupies.
+#[tauri::command]
+pub async fn checkpoint_size(state: State<'_, AppState>) -> Result<u64, String> {
+    let workspace = state
+        .workspace
+        .read()
+        .await
+        .clone()
+        .ok_or("No workspace selected.")?;
+    Ok(crate::checkpoint::CheckpointStore::new(workspace).size_bytes())
+}

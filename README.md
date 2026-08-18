@@ -84,7 +84,13 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
   attacker-controllable text
 - Checkpoints: every agent edit is captured before it happens and can be
   reverted; the store is refused to the agent in every mode
-- Publishing to GitHub is confirmed even in unrestricted mode
+- Publishing to GitHub is confirmed even in unrestricted mode, and so is
+  capturing a screen — unrestricted means "stop interrupting me about my own
+  machine", not "post as me" or "photograph whatever is open"
+- Fetched web pages are labelled as untrusted content, and nothing they say can
+  reach the permission engine
+- The tool list is trimmed to what the running model can choose between: 21
+  schemas is fine for a 27B and unusable for a 0.5B
 
 **Reach**
 - GitHub: issues, pull requests, releases, Actions, checks, diffs — with
@@ -93,6 +99,7 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
 - Images and screenshots, delegated to a vision model so the coding model does
   not have to be multimodal
 - Android devices over ADB: screen, UI hierarchy, logs
+- Web search and page reading, with no API key to configure
 - Turkish and English interface, Turkish by default
 
 ## Status
@@ -120,9 +127,9 @@ The desktop app has a session sidebar, streaming chat with collapsible tool
 rows, message actions, an approve/reject bar, and composer controls for
 permission mode, model, effort, and context window.
 
-Still missing: an undo button in the UI (checkpoints exist and restore, but
-nothing surfaces them yet), a search tool, streamed command output, and
-audio/video. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the honest split, and
+Still missing: an undo button in the UI (checkpoints are captured, restorable,
+and exposed as commands, but nothing in the interface calls them yet), streamed
+command output, and audio/video. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the honest split, and
 [`docs/SPEED.md`](docs/SPEED.md) for what does and does not make local models
 faster.
 

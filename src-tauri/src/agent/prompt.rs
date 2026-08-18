@@ -53,6 +53,64 @@ impl PromptTier {
             Self::Full => 1400,
         }
     }
+
+    /// How many tool schemas this tier can hold before choosing badly.
+    ///
+    /// A model does not fail loudly when given too many tools — it starts
+    /// picking the wrong one, or inventing names. The app can advertise 21
+    /// (files, GitHub, documents, images, devices, web), which is far past what
+    /// a 0.5B model can choose between.
+    pub fn tool_budget(&self) -> usize {
+        match self {
+            Self::Minimal => 5,
+            Self::Compact => 12,
+            Self::Full => usize::MAX,
+        }
+    }
+}
+
+/// Tools every tier keeps, in the order they matter.
+///
+/// These are the ones a coding task cannot proceed without, so they are never
+/// dropped to make room for anything else.
+const CORE_TOOLS: &[&str] = &[
+    "read_file",
+    "edit_file",
+    "write_file",
+    "list_dir",
+    "run_command",
+];
+
+/// Trim the tool list to what the model can actually choose between.
+///
+/// Core file tools are kept first, then everything else in the order given,
+/// until the tier's budget is reached. Dropping a tool is better than keeping
+/// it and having the model pick it by mistake — and a tool the model never
+/// needed still costs prefill on every single step.
+pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
+    let budget = tier.tool_budget();
+    if tools.len() <= budget {
+        return tools.to_vec();
+    }
+
+    let mut chosen: Vec<Tool> = Vec::with_capacity(budget);
+    for name in CORE_TOOLS {
+        if chosen.len() >= budget {
+            break;
+        }
+        if let Some(tool) = tools.iter().find(|t| t.function.name == *name) {
+            chosen.push(tool.clone());
+        }
+    }
+    for tool in tools {
+        if chosen.len() >= budget {
+            break;
+        }
+        if !chosen.iter().any(|c| c.function.name == tool.function.name) {
+            chosen.push(tool.clone());
+        }
+    }
+    chosen
 }
 
 /// Build the system prompt.
@@ -236,6 +294,57 @@ mod tests {
         for marker in ["2026", "step ", "timestamp", ":00"] {
             assert!(!p.to_lowercase().contains(marker), "found volatile marker {marker:?}");
         }
+    }
+
+    fn named(name: &str) -> Tool {
+        Tool::function(name, "does a thing", json!({"type": "object", "properties": {}}))
+    }
+
+    /// The surface `run_agent` actually builds: files + GitHub + media.
+    fn full_surface() -> Vec<Tool> {
+        let mut tools: Vec<Tool> = CORE_TOOLS.iter().map(|n| named(n)).collect();
+        for i in 0..12 {
+            let name = format!("gh_tool_{i}");
+            tools.push(named(&name));
+        }
+        for n in ["read_document", "view_image", "screenshot", "adb"] {
+            tools.push(named(n));
+        }
+        tools
+    }
+
+    #[test]
+    fn a_small_model_is_not_handed_the_whole_surface() {
+        let all = full_surface();
+        assert_eq!(all.len(), 21, "the surface this guards against");
+
+        let minimal = select_tools(&all, PromptTier::Minimal);
+        assert_eq!(minimal.len(), 5);
+
+        let compact = select_tools(&all, PromptTier::Compact);
+        assert_eq!(compact.len(), 12);
+
+        // A capable model still gets everything.
+        assert_eq!(select_tools(&all, PromptTier::Full).len(), 21);
+    }
+
+    #[test]
+    fn file_tools_survive_every_trim() {
+        // Dropping `read_file` would leave a coding agent unable to work at all.
+        let all = full_surface();
+        for tier in [PromptTier::Minimal, PromptTier::Compact, PromptTier::Full] {
+            let selected = select_tools(&all, tier);
+            let names: Vec<&str> = selected.iter().map(|t| t.function.name.as_str()).collect();
+            for core in CORE_TOOLS {
+                assert!(names.contains(core), "{tier:?} dropped {core}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_list_is_returned_unchanged() {
+        let few: Vec<Tool> = CORE_TOOLS.iter().take(3).map(|n| named(n)).collect();
+        assert_eq!(select_tools(&few, PromptTier::Minimal).len(), 3);
     }
 
     #[test]
