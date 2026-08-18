@@ -1,3 +1,37 @@
+# v0.2.2 — bound the wait by what the model may produce
+
+A fix for long generations on slow or spilled models, replacing fixed timeouts
+with a strict bound on generation length and a budget calculated from real throughput.
+
+## Why the first fix did not hold
+
+In v0.2.1 the budget was raised to a higher fixed number. But in real use, a spilled
+27B model on a 65k context window stalled again at 623 seconds: without an explicit
+`num_predict`, nothing bounded what the model was allowed to generate. At 5.7 tok/s,
+filling a 65k window would mean over 3 hours of legitimate silence. No static number
+can cover that.
+
+## Calculated budget and explicit response cap
+
+- **Response cap (`num_predict`)**: Requests now explicitly cap output tokens (default 8192,
+  scaled down on smaller context windows). 8192 tokens provides ample headroom for long
+  single-file code generation (~2500 tokens) while guaranteeing generation is bounded.
+  If the cap is ever hit, the app reports it clearly instead of failing silently.
+- **Dynamic budget**: The wait budget is now computed as `cap / model_throughput` plus
+  margin, rather than a guessed constant.
+- **Fail-fast liveness check**: During long silences, the daemon is periodically checked
+  via `ps` (every 10s after 30s of quiet). If the model has been evicted from memory or
+  the daemon crashed, the run fails immediately rather than waiting out the full budget.
+- **Accurate retries**: Retries no longer drop conversation context when the model was
+  already actively generating.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
+---
+
 # v0.2.1 — a slow model is not a broken one
 
 Four fixes from real use, three of them the same mistake in different places:
