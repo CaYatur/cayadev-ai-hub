@@ -91,9 +91,23 @@ pub async fn ollama_version(state: State<'_, AppState>) -> Result<String, String
 #[tauri::command]
 pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelProfile>, String> {
     let budget = *state.budget.read().await;
-    let profiles = load_profiles(&state.client, budget)
+    let mut profiles = load_profiles(&state.client, budget)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Reloading re-reads capabilities and placement from the daemon, neither of
+    // which knows how fast a model ran here. Carry the measurements over —
+    // losing them would put the timeout budgets back on estimates every time
+    // the model list refreshes.
+    {
+        let known = state.profiles.read().await;
+        for p in profiles.iter_mut() {
+            if let Some(previous) = known.iter().find(|k| k.name == p.name) {
+                p.observed_decode_tps = previous.observed_decode_tps;
+            }
+        }
+    }
+
     *state.profiles.write().await = profiles.clone();
     Ok(profiles)
 }
@@ -377,13 +391,32 @@ pub async fn run_agent(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let emitter = app.clone();
     let pump = tokio::spawn(async move {
+        // The rate this model really manages, kept for the next run's budgets.
+        // The estimate from placement is a starting point; after one step there
+        // is a measurement, and a spilled model can be half the estimate or
+        // twice it depending on what else is on the card.
+        let mut fastest: Option<f64> = None;
         while let Some(event) = rx.recv().await {
+            if let AgentEvent::StepDone { metrics, .. } = &event {
+                if metrics.decode_tps > 0.0 {
+                    // The fastest step, not the average: a step cut short by a
+                    // tool call reports a low rate that says nothing about how
+                    // fast the model decodes.
+                    fastest = Some(fastest.map_or(metrics.decode_tps, |f: f64| f.max(metrics.decode_tps)));
+                }
+            }
             let _ = emitter.emit("agent://event", &event);
         }
+        fastest
     });
 
     let reason: StopReason = runner.run(&prompt, &mut tools, gate.as_ref(), tx).await;
-    let _ = pump.await;
+    if let Ok(Some(measured)) = pump.await {
+        let mut profiles = state.profiles.write().await;
+        if let Some(p) = profiles.iter_mut().find(|p| p.name == chosen) {
+            p.observed_decode_tps = Some(measured);
+        }
+    }
 
     Ok(format!("{reason:?}"))
 }

@@ -115,14 +115,16 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
 
 | | |
 | --- | --- |
-| <img src="docs/media/models.png" alt="Installed models"> | <img src="docs/media/activity.png" alt="Activity"> |
-| **Models** — what each one is, where it will actually run, and which task it is routed to. Placement is read from the GPU driver. | **Activity** — every file change with a revert button, every decision with the reason the engine gave. |
-| <img src="docs/media/vision.png" alt="A screenshot question"> | <img src="docs/media/chat.png" alt="Chat"> |
-| **Seeing the screen** — "what is open on my computer?" goes to a model that can look, not to a search. | **Chat** — collapsed tool rows, folded reasoning, live tok/s and context occupancy. |
+| <img src="docs/media/models.png" alt="The installed models, each with its size, capabilities and where it will actually run"> | <img src="docs/media/activity.png" alt="The activity page, listing revertable file changes and the reason given for each decision"> |
+| **Models** — what each one is, where it will actually run, and which task it is routed to. Placement is read from the GPU driver, not assumed. | **Activity** — every file change with a revert button, every decision with the reason the engine gave for it. |
+| <img src="docs/media/vision.png" alt="Asking what is open on screen, answered from a screenshot"> | |
+| **Seeing the screen** — "what is open on my computer?" goes to a model that can look, not to a shell command. | |
 
 Screenshots are the app itself, rendered over an example transcript by
-`scripts/demo/` — the models, sizes and throughput figures in them are the
-measured ones from [`BENCHMARKS.md`](docs/BENCHMARKS.md).
+`scripts/demo/`. The model names and sizes are what the daemon reports on the
+development machine and the throughput figures are the measured ones from
+[`BENCHMARKS.md`](docs/BENCHMARKS.md); the conversation is written for the
+picture.
 
 ## Requirements
 

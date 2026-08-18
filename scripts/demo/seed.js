@@ -1,10 +1,13 @@
 // Fixture for the README screenshots.
 //
 // Written before the app boots, so `scripts/demo/` renders the real components
-// over a conversation that has already happened. Nothing here is invented for
-// effect: the model names, sizes, placements and throughput figures are the
-// measured ones from `docs/BENCHMARKS.md` on the development machine, and the
-// transcript is a task the agent actually does.
+// over a conversation that has already happened.
+//
+// The model names and byte sizes are what `ollama list` reports on the
+// development machine, the placements are what the registry computes for an
+// 8 GB card, and the throughput figures come from `docs/BENCHMARKS.md`. The
+// conversation itself is written for the picture — it is a task the agent does,
+// not a transcript of one particular run.
 //
 // Two things are stubbed because a browser is not a Tauri window: the command
 // bridge, so the model list and version render, and `localStorage`, which the
