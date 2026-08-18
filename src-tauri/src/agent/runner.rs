@@ -159,13 +159,19 @@ impl AgentRunner {
         events: mpsc::Sender<AgentEvent>,
     ) -> StopReason {
         // Relay command output as it arrives.
+        //
+        // The pump holds a clone of `events`, so it has to be stopped when the
+        // run ends — otherwise the event channel never closes, whoever is
+        // draining it never sees the end of the stream, and the caller waits
+        // forever. `run` returns from a dozen places, so the handle is dropped
+        // by a guard rather than aborted at each one.
         let (progress_tx, mut progress_rx) = mpsc::channel::<String>(256);
         let progress_events = events.clone();
-        let progress_pump = tokio::spawn(async move {
+        let _progress = AbortOnDrop(tokio::spawn(async move {
             while let Some(text) = progress_rx.recv().await {
                 let _ = progress_events.send(AgentEvent::ToolProgress { text }).await;
             }
-        });
+        }));
 
         let tier = PromptTier::for_params(self.config.params_billions);
         // Trim to what this model can choose between, then shorten what is left.
@@ -173,7 +179,6 @@ impl AgentRunner {
         let known: Vec<String> = schemas.iter().map(|t| t.function.name.clone()).collect();
 
         tools.set_progress(progress_tx);
-        let _ = &progress_pump;
 
         let workspace = self.perms.workspace().display().to_string();
         let mut messages = vec![
@@ -380,6 +385,19 @@ impl AgentRunner {
             .send(AgentEvent::Done { reason: StopReason::BudgetExhausted })
             .await;
         StopReason::BudgetExhausted
+    }
+}
+
+/// Stops a background task when it goes out of scope.
+///
+/// Used for the progress relay, which holds a clone of the event sender. A
+/// relay that outlives its run keeps the event channel open, and the caller
+/// draining that channel then waits for an end that never arrives.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
