@@ -82,16 +82,28 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
 
 ## Status
 
-Early, and specific about it. The Rust core — Ollama client, model registry and
-routing, tolerant tool-call parsing, and the permission engine — is implemented
-and covered by 79 unit tests plus live integration tests against a real daemon.
-The app builds, launches, and lists your models with their placement and the
-routing policy derived from them.
+Early, and specific about it. **The agent runs.** The Rust core — client,
+registry and routing, tolerant parsing, permission engine, agent loop, tool
+surface, and model-assisted approval — is covered by 109 unit tests and 9 live
+integration tests that drive real models end to end.
 
-**There is no agent loop yet.** You cannot run an agent from this build. The
-runner, the tool surface, and the chat UI are the next work — see
-[`docs/ROADMAP.md`](docs/ROADMAP.md), which distinguishes what is built from
-what is only specified.
+Measured on the development machine, in a scratch directory:
+
+| Live test | Result |
+| --- | --- |
+| `qwen2.5-coder:7b` reads a file and answers | 2 steps, 54 tok/s |
+| `qwen2.5-coder:7b` writes a working Python file | 2 steps, 61 tok/s |
+| `qwen2.5-coder:0.5b` attempts the same task | 294 tok/s, loop detected and stopped cleanly |
+| Approval classifier verdict | 188 ms |
+| `rm -rf /` with the classifier enabled | refused |
+
+**Every tool call `qwen2.5-coder:7b` made arrived as bare JSON in the message
+body with an empty `tool_calls` field.** Without tolerant parsing this agent
+would do nothing at all — which is the whole thesis, confirmed end to end.
+
+**There is no chat UI yet** — the app lists models but you drive the agent from
+tests. That, and the wider tool surface, are next; see
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Requirements
 

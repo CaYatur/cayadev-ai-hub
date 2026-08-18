@@ -8,6 +8,7 @@ pub mod agent;
 pub mod commands;
 pub mod ollama;
 pub mod perms;
+pub mod tools;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

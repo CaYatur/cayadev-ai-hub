@@ -45,6 +45,7 @@ walkdir = "2"
 similar = "2"
 regex = "1"
 dirs = "6"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

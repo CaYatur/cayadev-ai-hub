@@ -70,6 +70,14 @@ pub struct Evaluation {
 }
 
 impl Evaluation {
+    /// Allow a call that has no effect outside the process.
+    ///
+    /// Public so the runner can settle tools that map to no [`Action`] without
+    /// inventing a fake one to evaluate.
+    pub fn allow_internal(reason: impl Into<String>) -> Self {
+        Self::allow(reason)
+    }
+
     fn allow(reason: impl Into<String>) -> Self {
         Self {
             decision: Decision::Allow,
