@@ -1,178 +1,109 @@
 # Roadmap
 
-Honest status. Anything marked **Done** has code and passing tests in the repo;
+Honest status. Anything under **Built** has code and passing tests in the repo;
 everything else is not built yet, however well specified it looks.
 
-## Done
+## Built
 
 ### Ollama integration — `src-tauri/src/ollama/`
 - Wire types tolerant of missing fields across daemon versions
-- Streaming chat over newline-delimited JSON, with chunk reassembly
-- **Idle-based timeouts** rather than total-request timeouts, split into a
-  first-token budget (covers model load + prefill) and an inter-token budget
-- Model registry: capability detection, GGUF metadata parsing, true context
-  limits, KV-cache cost per token
-- **VRAM fit estimation** that accounts for hybrid attention
-  (`full_attention_interval`), so it does not overestimate the cache by 4x on
-  SSM-hybrid models like `qwen3.8`
-- **Task-based routing policy** derived automatically from installed models,
-  ranking placement above raw size — a resident 4.4 GB model beats a marginal
-  4.6 GB one, and a small thinking model does not outrank a much larger
-  workhorse for planning
-- Tauri command layer (`list_models`, `routing_policy`, `ollama_version`), so
-  the UI never calls the daemon cross-origin
-- Live integration tests against a real daemon (`cargo test --test live_ollama
-  -- --ignored`), which is how both routing bugs above were found
+- Streaming chat with **idle-based timeouts** — a first-token budget covering
+  model load and prefill, and a separate inter-token budget — rather than a
+  total-request timeout that kills a legitimately slow prefill
+- Cancellation that reaches an in-flight stream, not only the gaps between steps
+- Model registry: capability detection, true context limits from GGUF metadata,
+  and VRAM fit estimation that accounts for hybrid attention
+- **GPU memory read from `nvidia-smi`**, not assumed
+- Task-based routing derived from installed models, ranking placement above size
 
-### Agent reliability — `src-tauri/src/agent/`
+### Agent loop — `src-tauri/src/agent/`
 - **Tolerant tool-call extraction**: native field, `<tool_call>` tags, fenced
-  blocks, `<function=name>` tags, bare JSON in prose, Python-style calls
-- JSON repair: single quotes, unquoted keys, trailing commas, Python literals,
-  and truncated output with unbalanced braces
-- Guards against false positives — unknown tool names and config snippets in
-  prose are not treated as calls
-- Tiered system prompts sized to what a model can actually follow, with a
-  byte-stable prefix so the daemon reuses its KV cache
-- Tool-schema compaction for small models that preserves names and required
-  fields
+  blocks, `<function=name>` tags, bare JSON in prose, Python-style calls, with
+  JSON repair and fuzzy name resolution
+- **Invented tool names are corrected**, not read as an answer — the 0.5B emits
+  `read_config` for `read_file`, and before this the run ended having done
+  nothing
+- Schema validation naming the missing argument, loop detection on the call
+  signature, step budget
+- Tiered prompts sized to what a model can follow, with a byte-stable prefix so
+  the daemon reuses its KV cache (measured: **14.8x** faster prefill)
+- **Prompts measured against tool drift** (`scripts/drift.py`): the previous
+  wording produced five false tool calls out of eight greetings; the current one
+  produces none
+- Tool-list trimming ordered by usefulness rather than by assembly order
+- Model-assisted approval that can only soften "ask" to "allow", never sees a
+  destructive call, and receives sanitised computed facts
 
 ### Permissions — `src-tauri/src/perms/`
-- Four modes: read-only, project-auto, balanced, unrestricted
-- Component-wise workspace containment — not fooled by `..` traversal, shared
-  string prefixes (`/work/project` vs `/work/project-backup`), Windows case
-  differences, or `\\?\` verbatim prefixes
-- Command risk classification with **shell payload inspection**: `bash -c "git
-  status && rm -rf /"` classifies by its worst segment, including `$(...)` and
-  backtick substitutions
-- Credential paths and catastrophic commands refused in *every* mode, including
-  unrestricted
-
-### Tool budgeting — `src-tauri/src/agent/prompt.rs`
-- The full surface is ~21 schemas (files, GitHub, documents, images, devices,
-  web). `select_tools` trims that to 5 for a Minimal-tier model and 12 for a
-  Compact one, always keeping the file tools
-- Verified live: the 0.5B was run against the full surface and completed using
-  `read_file`, without reaching for GitHub or device tools
-
-### Agent loop — `src-tauri/src/agent/runner.rs`
-- Runs to completion against real models: 54-61 tok/s on `qwen2.5-coder:7b`
-- Schema validation before execution, naming the missing argument
-- Loop detection on the call signature, which is what stops a 0.5B model
-  cycling read_file -> edit_file -> run_command until the budget runs out
-- Step budget, cancellation, streamed events
+- Five modes: read-only, project-auto, balanced, **autonomous**, unrestricted
+- Component-wise containment: not fooled by `..`, shared string prefixes,
+  Windows case, or `\\?\` prefixes
+- Command risk classification with shell payload inspection, including `$(...)`
+  and backticks
+- Credentials, system paths, the checkpoint store, and catastrophic commands
+  refused in *every* mode
+- `Publish` and `CaptureScreen` as distinct decisions rather than incidental ones
 
 ### Tools — `src-tauri/src/tools/`
-- read_file, write_file, edit_file, list_dir, run_command
-- Paths resolved and normalised *before* the permission engine sees them
-- Output capped so a large file cannot consume a small model's whole context
-- `edit_file` refuses an ambiguous match rather than replacing the first of
-  several occurrences
-
-### Model-assisted approval — `src-tauri/src/agent/approver.rs`
-- Can only turn Ask into Allow; never sees Deny, Destructive, Catastrophic, or
-  anything leaving the workspace
-- Input is computed facts only, each sanitised to a short alphanumeric token
-- Output must be the single word ALLOW, matched exactly
-- 188 ms per decision on the routed classifier
-- Injection tests assert a hostile payload produces byte-identical input
-
-### Desktop UI
-- Session sidebar grouped by age, persisted locally; a session takes its title
-  from the first instruction and carries the workspace forward
-- Tool calls collapsed to one scannable line, expandable on demand, with
-  refused and rejected calls struck through
-- A "rescued" flag when the tolerant parser had to recover a malformed call
-- Status line: elapsed, tokens, live decode rate, active permission mode, Stop
-- Streaming chat, approve/reject bar, permission-mode selector with a typed
-  confirmation for Unrestricted
-- Model list with placement, routing table, GPU re-read
-
-### GPU probing — `src-tauri/src/ollama/gpu.rs`
-- Budget read from `nvidia-smi` rather than assumed, fixing a wrong routing
-  decision caused by the old fixed reserve
+- Files: read, write, edit, list, and **search** (contents and names, skipping
+  `node_modules` and `.git`)
+- Commands with **streamed output** while they run
+- GitHub: status, issues, PRs, releases, Actions, checks, diffs, commit, push —
+  with `gh_open_pr` and `gh_create_release` collapsing multi-command flows into
+  one call
+- Web search and page reading, wrapped in an untrusted-content marker
+- Documents through a Python sidecar; images and screens through the routed
+  vision model; **audio transcription** and **video by frame extraction**
+- ADB: devices, screen, UI hierarchy, logcat
+- Every tool hides itself when its dependency is missing
 
 ### Checkpoints — `src-tauri/src/checkpoint/`
-- Prior contents captured before every write and edit, content-addressed by
-  SHA-256 so repeated edits to unchanged files cost one object
-- Files over 8 MB journalled as "not captured" rather than copied
-- The store is refused to the agent in every mode and gitignores itself
-
-### GitHub — `src-tauri/src/tools/github.rs`
-- Status, issues, PRs, releases, Actions runs, checks, diffs, commit, push
-- `gh_open_pr` and `gh_create_release` collapse multi-command flows into one
-  call, because six tool calls is six model turns a small model will not survive
-- Publishing is `Action::Publish`, confirmed in every mode including
-  Unrestricted
-- Only advertised inside a git repository
-
-### Web — `src-tauri/src/tools/web.rs`
-- `web_search` over DuckDuckGo's HTML endpoint, so it works with no API key
-- `web_read` turns a page into readable text without adding an HTML parser
-- Everything returned is wrapped in an untrusted-content marker, and the
-  permission engine never consults page content when judging a later call
-
-### Documents, images, devices — `src-tauri/src/tools/media.rs`
-- PDF, Word, Excel, PowerPoint via a Python sidecar; text and CSV in Rust
-- `view_image` and `screenshot` delegate to the routed vision model and return
-  a description, so a non-multimodal coding model can still act on an image
-- ADB: devices, screen, UI hierarchy, logcat
-- Tools are advertised only when their dependency is actually present
+- Prior contents captured before every write and edit, content-addressed so
+  repeated edits to unchanged files cost one object
+- Restorable from the Activity page
 
 ### Interface
-- Turkish and English, Turkish default, switchable in the sidebar
+- Session sidebar, streaming chat, collapsible tool rows, message actions
+- Composer controls for permission mode, model, effort, and context window
+- **Collapsible reasoning blocks** with a live label
+- Attachments by drag-and-drop or paste — the agent gets a **copy**, never the
+  original
+- Activity page: every checkpoint with a revert button, every decision with its
+  reason
+- Turkish and English, Turkish by default
 
 ### Measurement
-- Reproducible benchmark harness (`scripts/bench.py`) that pins `num_ctx` and
-  records the placement the daemon actually chose
-- Results published in [`BENCHMARKS.md`](BENCHMARKS.md)
+- `scripts/bench.py` — throughput, pinning `num_ctx` and recording placement
+- `scripts/speed_experiments.py` and `scripts/ab_threads.py` — runtime knobs
+- `scripts/drift.py` — false and missed tool calls per prompt variant
+- `scripts/probe_toolcalls.py` — what format each installed model emits
+- Results in [`BENCHMARKS.md`](BENCHMARKS.md) and [`SPEED.md`](SPEED.md)
 
 ## Known gaps
 
-- **GPU probing is NVIDIA-only.** AMD and Intel hosts fall back to the fixed
-  assumption. `refresh_vram_budget` returns an error there, and the UI should
-  offer a manual figure.
-- **Document extraction needs Python** with pymupdf, python-docx, and openpyxl.
-  Bundling an interpreter would roughly double the release, so it is a declared
-  prerequisite and the tools hide themselves when it is absent.
+- **The tool-budget numbers are judgement, not measurement.** 6 for the smallest
+  tier and 13 for the middle one were chosen to hold the core tools plus one
+  capability from each family. Live tests confirm a 7B still finishes a task at
+  13 and a 0.5B still produces usable calls at 6; where either actually degrades
+  has not been measured.
+- **GPU probing is NVIDIA-only.** AMD and Intel hosts fall back to a fixed
+  assumption, and `refresh_vram_budget` returns an error there.
 - **Windows-only testing.** Nothing is deliberately platform-specific, but the
-  path and command tests have only been exercised on Windows.
-- **The UI has not been driven by hand end to end, and its appearance is
-  unverified.** The Rust layer is covered by live tests; the frontend
-  typechecks, its command and event names are cross-checked against Rust, and
-  its rendered structure was inspected in a browser. Nobody has clicked through
-  a full session, and no one has looked at the pixels.
+  path, command, and screen-capture code has only been exercised on Windows.
+- **DuckDuckGo's HTML endpoint is scraped, not an API.** It can change; the live
+  test in `tests/live_web.rs` is what will catch it.
 
-## Next
+## Not built
 
-In dependency order.
-
-1. **Undo from the UI** — `checkpoint_list`, `checkpoint_restore`, and
-   `checkpoint_size` exist as commands; nothing in the interface calls them
-2. **Streamed command output** — long-running commands return only when they
-   finish
-3. **Audio and video** — transcription and analysis are still unbuilt
-4. **Workspace search** — the agent works around it with `run_command`
-
-## Later
-
-Specified but not designed in detail yet.
-
-- **Model-assisted approval** — a small fast model pre-classifying reversible
-  calls, able to turn "ask" into "allow" but never to authorise anything the
-  rules called destructive
-- **GitHub integration** — issues, PRs, reviews, releases, Actions status, with
-  the multi-step flows collapsed into single tool calls so a weak model can
-  complete them
-- **Attachments** — PDF, Word, Excel, CSV via a Python sidecar
-- **Vision** — screenshots and images routed to vision-capable models
-- **Audio and video** — transcription and analysis
-- **ADB** — device screenshots, UI inspection, input
-- **Computer use** — desktop screenshots and control
+- Multiple agents working in parallel
+- Remote or team-shared sessions
+- MCP servers as a tool source
+- A plugin API
 
 ## Non-goals
 
-- **Making a spilled model fast.** A 27B model on an 8 GB card is bound by
-  memory bandwidth. The app routes around that; it cannot remove it.
+- **Making a spilled model fast.** A 27B on an 8 GB card is bound by memory
+  bandwidth. The app routes around that; it cannot remove it.
 - **Bundling models.** Ollama manages models; this is a client.
 - **A cloud service.** Everything runs locally except explicitly cloud-tagged
   Ollama models.
