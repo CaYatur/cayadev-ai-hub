@@ -254,11 +254,18 @@ impl RoutingPolicy {
             .min_by_key(|p| p.weights_bytes)
             .or(workhorse);
 
+        // Vision is ranked differently from everything else: best placement
+        // first, then the *smallest* model rather than the largest.
+        //
+        // Describing a picture is a bounded job that a 7B VL model does as well
+        // as a 27B one, and when nothing fits in VRAM "largest" picks the 17.7
+        // GB model — measured at 249 s to read one screenshot, against seconds
+        // for a 6 GB one. Size buys nothing here and costs everything.
         let vision = candidates
             .iter()
             .copied()
             .filter(|p| p.capabilities.vision)
-            .max_by_key(|p| score(&p));
+            .min_by_key(|p| (std::cmp::Reverse(placement_rank(p.placement)), p.weights_bytes));
 
         if let Some(m) = reasoner {
             policy.set(TaskClass::Reasoning, &m.name);
@@ -275,6 +282,27 @@ impl RoutingPolicy {
             policy.set(TaskClass::Vision, &m.name);
         }
         policy
+    }
+}
+
+impl ModelProfile {
+    /// Decode rate to plan around, in tokens per second.
+    ///
+    /// A measurement when there is one, otherwise what placement implies.
+    /// The estimates are the measured figures from `docs/BENCHMARKS.md` on an
+    /// 8 GB card: a resident 7B decodes at 42, and the same size spilled to
+    /// system RAM manages 5. That eight-fold spread is why anything timing the
+    /// model has to ask rather than assume.
+    pub fn expected_decode_tps(&self) -> f64 {
+        if let Some(measured) = self.observed_decode_tps.filter(|t| *t > 0.0) {
+            return measured;
+        }
+        match self.placement {
+            Placement::Resident => 40.0,
+            Placement::Marginal => 20.0,
+            Placement::Cloud => 30.0,
+            Placement::Spilled | Placement::Unknown => 5.0,
+        }
     }
 }
 
@@ -415,6 +443,51 @@ mod tests {
             observed_decode_tps: None,
         }
     }
+
+    fn seeing(name: &str, bytes: u64, placement: Placement) -> ModelProfile {
+        let mut p = profile(name, bytes, placement, true, true);
+        p.capabilities.vision = true;
+        p
+    }
+
+    #[test]
+    fn vision_takes_the_smallest_model_that_is_best_placed() {
+        // Bigger buys nothing for reading a screenshot and costs a great deal
+        // when it does not fit.
+        let models = vec![
+            seeing("vl-7b", 6_000_000_000, Placement::Resident),
+            seeing("vl-8b", 6_100_000_000, Placement::Resident),
+            seeing("vl-27b", 17_700_000_000, Placement::Spilled),
+        ];
+        let policy = RoutingPolicy::derive(&models);
+        assert_eq!(policy.get(TaskClass::Vision), Some("vl-7b"));
+    }
+
+    #[test]
+    fn a_spilled_giant_is_not_chosen_to_read_an_image() {
+        // The measured failure: with a 17.7 GB model loaded, every vision model
+        // reads as spilled, and ranking by size then picked the giant — 249 s
+        // to describe one screenshot.
+        let models = vec![
+            seeing("vl-7b", 6_000_000_000, Placement::Spilled),
+            seeing("vl-27b", 17_700_000_000, Placement::Spilled),
+        ];
+        let policy = RoutingPolicy::derive(&models);
+        assert_eq!(policy.get(TaskClass::Vision), Some("vl-7b"));
+    }
+
+    #[test]
+    fn placement_still_outranks_size_for_vision() {
+        // Smaller is preferred among equals, not in spite of a worse fit: a
+        // resident 8 GB model beats a spilled 6 GB one.
+        let models = vec![
+            seeing("vl-small-spilled", 6_000_000_000, Placement::Spilled),
+            seeing("vl-large-resident", 8_000_000_000, Placement::Resident),
+        ];
+        let policy = RoutingPolicy::derive(&models);
+        assert_eq!(policy.get(TaskClass::Vision), Some("vl-large-resident"));
+    }
+
 
     #[test]
     fn routing_sends_classification_to_the_cheapest_model() {

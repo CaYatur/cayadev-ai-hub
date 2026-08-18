@@ -306,6 +306,17 @@ pub async fn run_agent(
     let assisted = *state.assisted_approval.read().await;
     let mode = *state.mode.read().await;
 
+    // A model that can see reads its own screenshots.
+    //
+    // Routing to a second model is for models that cannot see at all. When the
+    // running one can, sending the picture elsewhere and handing back somebody
+    // else's description is both slower and a worse answer — and it is not the
+    // model the user chose.
+    let eyes = profile
+        .filter(|p| p.capabilities.vision)
+        .map(|p| p.name.clone())
+        .or_else(|| policy.get(TaskClass::Vision).map(str::to_string));
+
     let mut tools = WorkspaceTools::new(&workspace)
         .with_asker(Arc::new(crate::session::UiAsker::new(
             app.clone(),
@@ -313,7 +324,7 @@ pub async fn run_agent(
         )))
         .with_media(
             state.client.clone(),
-            policy.get(TaskClass::Vision).map(str::to_string),
+            eyes,
             tauri::Manager::path(&app).resource_dir().ok(),
         );
     let mut perms = PermissionEngine::new(&workspace, mode);
@@ -326,8 +337,17 @@ pub async fn run_agent(
     // A new run starts uncancelled, whatever the last one ended as.
     state.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
+    // Budgets sized to this model, not to an average one.
+    //
+    // A resident 7B that says nothing for three minutes is broken; a spilled
+    // 27B that says nothing for nine is writing a file — measured, and the
+    // fixed budget was cutting it off.
+    let paced = state.client.with_timeouts(Timeouts::for_throughput(
+        profile.map(|p| p.expected_decode_tps()).unwrap_or(20.0),
+    ));
+
     let runner = AgentRunner::new(
-        state.client.clone(),
+        paced,
         perms,
         RunConfig {
             model: chosen.clone(),

@@ -92,6 +92,14 @@ export type AgentEvent =
   | { kind: "tool_proposed"; call: ProposedCall }
   | { kind: "tool_settled"; id: string; outcome: Outcome; output: string }
   | { kind: "tool_progress"; text: string }
+  /**
+   * Nothing has arrived for `seconds`, and the run is still waiting.
+   *
+   * Not an error. Some templates hold a whole tool call back until it is
+   * finished, so a model writing a long file sends nothing at all while it
+   * does — measured at nine minutes on a 27B running from system RAM.
+   */
+  | { kind: "waiting"; seconds: number; first_token: boolean }
   | { kind: "step_done"; step: number; metrics: Metrics }
   | { kind: "done"; reason: string }
   | { kind: "error"; message: string };

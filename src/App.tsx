@@ -67,6 +67,10 @@ export default function App() {
   // needs: resetting it every step would make the rate jump about.
   const [liveTokens, setLiveTokens] = useState(0);
   const [runTokens, setRunTokens] = useState(0);
+  // Seconds since the model last sent anything, while it is still working.
+  const [waiting, setWaiting] = useState<{ seconds: number; firstToken: boolean } | null>(
+    null,
+  );
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
 
   // The event stream is global, so handlers need the current session id without
@@ -130,6 +134,7 @@ export default function App() {
               const estimate = Math.max(1, Math.round(event.text.length / 3.6));
               setLiveTokens((n) => n + estimate);
               setRunTokens((n) => n + estimate);
+              setWaiting(null);
             }
             patch(id, (s) => {
               const entries = [...s.entries];
@@ -145,6 +150,7 @@ export default function App() {
             break;
 
           case "thinking":
+            setWaiting(null);
             patch(id, (s) => {
               const entries = [...s.entries];
               const last = entries[entries.length - 1];
@@ -155,6 +161,10 @@ export default function App() {
               }
               return { ...s, entries };
             });
+            break;
+
+          case "waiting":
+            setWaiting({ seconds: event.seconds, firstToken: event.first_token });
             break;
 
           case "tool_proposed":
@@ -333,6 +343,7 @@ export default function App() {
       setRunStartedAt(Date.now());
       setLiveTokens(0);
       setRunTokens(0);
+      setWaiting(null);
       try {
         await api.run(
           text,
@@ -349,6 +360,7 @@ export default function App() {
         setRunStartedAt(null);
         setLiveTokens(0);
         setRunTokens(0);
+        setWaiting(null);
         setPending(null);
         setQuestion(null);
       }
@@ -562,6 +574,7 @@ export default function App() {
             attachments={attachments}
             liveTokens={liveTokens}
             runTokens={runTokens}
+            waiting={waiting}
             runStartedAt={runStartedAt}
             onPaste={attachPasted}
             dropping={dropping}

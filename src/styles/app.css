@@ -957,6 +957,8 @@
 }
 
 .composer-box {
+  /* Bottom-aligned so the send button stays put as the box grows upward. */
+  align-items: flex-end;
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -981,6 +983,9 @@
   color: var(--text-primary);
   resize: none;
   line-height: 1.55;
+  /* Height is set from `scrollHeight` as the text grows, capped in `Chat`. */
+  overflow-y: auto;
+  min-height: 44px;
 }
 
 .input:focus {

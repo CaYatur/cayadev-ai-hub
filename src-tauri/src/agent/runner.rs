@@ -79,6 +79,12 @@ pub enum AgentEvent {
     ToolSettled { id: String, outcome: Outcome, output: String },
     /// Output from a command that is still running.
     ToolProgress { text: String },
+    /// The model has sent nothing for `seconds`, and the run is still waiting.
+    ///
+    /// Emitted so a long silence reads as work rather than as a hang: a big
+    /// model loading, or one generating a tool call its template will not send
+    /// until it is complete.
+    Waiting { seconds: u64, first_token: bool },
     StepDone { step: usize, metrics: Metrics },
     Done { reason: StopReason },
     Error { message: String },
@@ -278,6 +284,9 @@ impl AgentRunner {
                         StreamEvent::Token { text } => Some(AgentEvent::Token { text }),
                         StreamEvent::Thinking { text } => Some(AgentEvent::Thinking { text }),
                         StreamEvent::Error { message } => Some(AgentEvent::Error { message }),
+                        StreamEvent::Silence { seconds, first_token } => {
+                            Some(AgentEvent::Waiting { seconds, first_token })
+                        }
                         StreamEvent::Done { .. } => None,
                     };
                     if let Some(out) = out {

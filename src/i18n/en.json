@@ -43,7 +43,9 @@
     "detach": "Remove",
     "dropHint": "Drop files to attach them",
     "pasted": "pasted image",
-    "jumpLatest": "Jump to latest"
+    "jumpLatest": "Jump to latest",
+    "loading": "loading the model… {{time}}",
+    "generating": "writing — this model sends nothing until it is done ({{time}})"
   },
   "approval": {
     "title": "Approve {{tool}}?",

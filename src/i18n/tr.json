@@ -43,7 +43,9 @@
     "detach": "Kaldır",
     "dropHint": "Eklemek için dosyaları bırakın",
     "pasted": "yapıştırılan görsel",
-    "jumpLatest": "En sona git"
+    "jumpLatest": "En sona git",
+    "loading": "model yükleniyor… {{time}}",
+    "generating": "yazıyor — bu model bitirmeden bir şey göndermiyor ({{time}})"
   },
   "approval": {
     "title": "{{tool}} onaylansın mı?",

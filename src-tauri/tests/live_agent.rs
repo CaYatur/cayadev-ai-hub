@@ -801,3 +801,157 @@ async fn the_agent_asks_rather_than_guessing() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A model far larger than the card, which is where the interesting failures are.
+const SPILLED: &str = "qwen3.8:27b-mtp-q4_K_M";
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon and several minutes"]
+async fn a_slow_model_writing_a_long_file_is_not_cut_off() {
+    // The reported failure, exactly. Asked for a single-file HTML page,
+    // `qwen3.8:27b-mtp-q4_K_M` streams its reasoning, then goes completely
+    // silent while it generates the tool call — its template sends the call in
+    // one piece, so nothing at all arrives until the file is finished.
+    // Measured at 547 seconds of silence; the fixed 180 s budget failed the run
+    // twice and lost the work.
+    let dir = scratch("slow-write");
+
+    let mut tools = WorkspaceTools::new(&dir);
+    let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+    let paced = client().with_timeouts(Timeouts::for_throughput(5.4));
+    let runner = AgentRunner::new(
+        paced,
+        perms,
+        RunConfig {
+            model: SPILLED.into(),
+            max_steps: 4,
+            num_ctx: Some(16384),
+            params_billions: Some(27.0),
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let log = Arc::new(Mutex::new(Transcript::default()));
+    let sink = log.clone();
+    let quiet = Arc::new(Mutex::new(0u64));
+    let quiet_sink = quiet.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let mut t = sink.lock().unwrap();
+            match ev {
+                AgentEvent::Token { text } => t.text.push_str(&text),
+                AgentEvent::ToolProposed { call } => t.tools_called.push(call.name.clone()),
+                AgentEvent::Waiting { seconds, .. } => {
+                    let mut longest = quiet_sink.lock().unwrap();
+                    *longest = (*longest).max(seconds);
+                }
+                AgentEvent::StepDone { metrics, .. } => {
+                    t.steps += 1;
+                    t.decode_tps.push(metrics.decode_tps);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let reason = runner
+        .run(
+            "Write a single-file HTML page introducing yourself to intro.html. \
+             At least 120 lines, with inline CSS. Use write_file.",
+            &mut tools,
+            &AutoApprove,
+            tx,
+        )
+        .await;
+    let _ = collector.await;
+    let t = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
+    let longest_silence = *quiet.lock().unwrap();
+
+    report("27b/slow-write", &reason, &t);
+    println!("  longest reported silence: {longest_silence}s");
+
+    assert_ne!(reason, StopReason::Failed, "the run was cut off again");
+    assert!(
+        t.tools_called.iter().any(|n| n == "write_file"),
+        "no file was written: {:?}",
+        t.tools_called
+    );
+    assert!(dir.join("intro.html").exists(), "intro.html is missing");
+    // The point of the heartbeat: a silence this long has to be visible while
+    // it happens, not explained afterwards.
+    assert!(longest_silence >= 30, "a long silence was never reported to the UI");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn a_screen_is_read_by_a_model_rather_than_by_powershell() {
+    // Two failures in one: the routed vision model was the 17.7 GB one, because
+    // ranking by size picks the giant once nothing fits, and thinking was left
+    // on, so the whole reply budget went to reasoning and the tool returned
+    // "(the vision model returned nothing)". The agent then fell back to
+    // listing window titles with PowerShell.
+    let dir = scratch("screen");
+    let mut tools = WorkspaceTools::new(&dir).with_media(
+        client(),
+        Some("qwen2.5vl:7b".into()),
+        None,
+    );
+    let perms = PermissionEngine::new(&dir, PermissionMode::Autonomous);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: CODER.into(),
+            max_steps: 4,
+            num_ctx: Some(8192),
+            params_billions: Some(7.0),
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let log = Arc::new(Mutex::new(Transcript::default()));
+    let sink = log.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let mut t = sink.lock().unwrap();
+            match ev {
+                AgentEvent::Token { text } => t.text.push_str(&text),
+                AgentEvent::ToolProposed { call } => t.tools_called.push(call.name.clone()),
+                AgentEvent::ToolSettled { output, .. } => t.text.push_str(&output),
+                AgentEvent::StepDone { metrics, .. } => {
+                    t.steps += 1;
+                    t.decode_tps.push(metrics.decode_tps);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let reason = runner
+        .run("Bilgisayarımın ekranında ne açık?", &mut tools, &AutoApprove, tx)
+        .await;
+    let _ = collector.await;
+    let t = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
+
+    report("coder/screen", &reason, &t);
+    assert!(
+        t.tools_called.iter().any(|n| n == "screenshot"),
+        "the screen was never captured: {:?}",
+        t.tools_called
+    );
+    assert!(
+        !t.text.contains("returned nothing"),
+        "the vision model produced no description: {}",
+        t.text
+    );
+    assert!(
+        !t.tools_called.iter().any(|n| n == "run_command"),
+        "fell back to the shell instead of looking: {:?}",
+        t.tools_called
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

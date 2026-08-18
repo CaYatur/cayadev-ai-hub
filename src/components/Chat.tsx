@@ -33,6 +33,12 @@ const MODES: PermissionMode[] = [
 ];
 const EFFORTS: Effort[] = ["fast", "balanced", "thorough"];
 
+/// How tall the instruction box may grow, in pixels.
+///
+/// Roughly twelve lines. Past that the transcript starts disappearing behind
+/// the composer, which costs more than the extra lines are worth.
+const INPUT_MAX_HEIGHT = 260;
+
 /** A tool call, collapsed to one scannable line until the user opens it. */
 function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
   const { t } = useTranslation();
@@ -366,6 +372,7 @@ export default function Chat({
   dropping,
   liveTokens,
   runTokens,
+  waiting,
   runStartedAt,
   onPaste,
   onDetach,
@@ -402,6 +409,7 @@ export default function Chat({
   /// during a step instead of only between them.
   liveTokens: number;
   runTokens: number;
+  waiting: { seconds: number; firstToken: boolean } | null;
   runStartedAt: number | null;
   onPaste: (file: File) => void;
   onDetach: (path: string) => void;
@@ -427,6 +435,21 @@ export default function Chat({
   const [tick, setTick] = useState(0);
   const transcript = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const input = useRef<HTMLTextAreaElement>(null);
+
+  /// Grow the box upward as the instruction gets longer, then stop.
+  ///
+  /// A two-line window on a fifteen-line instruction means writing through a
+  /// slot. Growing without limit is the other failure — the transcript
+  /// disappears behind the composer — so it stops at [`INPUT_MAX_HEIGHT`] and
+  /// scrolls from there.
+  useEffect(() => {
+    const el = input.current;
+    if (!el) return;
+    // Reset first: `scrollHeight` never shrinks below the height already set.
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_HEIGHT)}px`;
+  }, [prompt]);
 
   // A clock that only advances between steps is not a clock.
   useEffect(() => {
@@ -626,7 +649,12 @@ export default function Chat({
 
         {running && !pending && (
           <div className="working">
-            <span className="pulse" /> {t("chat.working")}
+            <span className="pulse" />{" "}
+            {waiting
+              ? t(waiting.firstToken ? "chat.loading" : "chat.generating", {
+                  time: formatElapsed(waiting.seconds * 1000),
+                })
+              : t("chat.working")}
           </div>
         )}
         {!atBottom && (
@@ -691,6 +719,7 @@ export default function Chat({
         <div className="composer-box">
           <textarea
             className="input"
+            ref={input}
             rows={2}
             placeholder={
               running

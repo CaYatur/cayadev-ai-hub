@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CaYaDev AI Hub — demo</title>
+  </head>
+
+  <body>
+    <!--
+      The real app, with a transcript already in it.
+
+      Screenshots for the README have to show the thing working, and the thing
+      working means a conversation that has actually happened. Rather than
+      staging a fake page in a graphics editor, this loads `src/main.tsx` —
+      the same components, the same stylesheet — over session data written to
+      `localStorage` first. Everything below is transcript content the app
+      would have stored itself.
+
+      Lives under `scripts/` and is not an input to `vite build`, so it is a
+      development page and never ships.
+    -->
+    <div id="root"></div>
+    <script src="./seed.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

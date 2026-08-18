@@ -126,7 +126,15 @@ impl MediaTools {
         PathBuf::from("..").join("scripts").join(name)
     }
 
-    /// Ask the vision model to describe an image, returning text.
+    /// Ask a model that can see to describe an image, returning text.
+    ///
+    /// Thinking is turned off explicitly. Left on, a reasoning-capable vision
+    /// model spends the whole reply budget on reasoning and returns empty
+    /// content — which is exactly what "(the vision model returned nothing)"
+    /// was: not a failure to see, a failure to stop thinking. And if a model
+    /// ignores the flag and reasons anyway, its reasoning is returned rather
+    /// than thrown away; a description buried in a thinking trace still answers
+    /// the question.
     async fn describe_image(&self, path: &Path, question: &str) -> Result<String, String> {
         let model = self
             .vision_model
@@ -146,18 +154,28 @@ impl MediaTools {
             }],
             stream: false,
             tools: None,
-            think: None,
+            think: Some(false),
             format: None,
-            options: Some(Options { num_ctx: Some(8192), num_predict: Some(600), ..Default::default() }),
+            options: Some(Options {
+                num_ctx: Some(8192),
+                // Room for a real description even on a model that reasons
+                // first. At 600 a thinking model never reached the answer.
+                num_predict: Some(2048),
+                ..Default::default()
+            }),
             keep_alive: Some("10m".into()),
         };
 
         let response = self.client.chat(request).await.map_err(|e| e.to_string())?;
-        Ok(response
-            .message
-            .map(|m| m.content)
-            .filter(|c| !c.trim().is_empty())
-            .unwrap_or_else(|| "(the vision model returned nothing)".into()))
+        let message = response.message.unwrap_or_default();
+        let said = message.content.trim().to_string();
+        if !said.is_empty() {
+            return Ok(said);
+        }
+        match message.thinking.as_deref().map(str::trim) {
+            Some(reasoning) if !reasoning.is_empty() => Ok(reasoning.to_string()),
+            _ => Ok("(the vision model returned nothing)".into()),
+        }
     }
 
     async fn run(&self, program: &str, argv: &[String]) -> Result<String, String> {
@@ -479,21 +497,31 @@ fn resource_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
     ]
 }
 
-/// Capture the primary display to a temporary PNG.
+/// Capture every display to a temporary PNG.
+///
+/// The whole virtual desktop, not the primary monitor. On a two-monitor desk
+/// the window being asked about is as likely to be on the second one, and
+/// capturing only the first returns a confident description of the wrong
+/// screen — worse than an error.
 async fn capture_screen() -> Result<PathBuf, String> {
     let target = std::env::temp_dir().join(format!("cayahub-shot-{}.png", uuid::Uuid::new_v4()));
 
     #[cfg(windows)]
     {
         // PowerShell with System.Drawing avoids shipping a capture binary.
+        // `VirtualScreen` spans all displays, including ones left of or above
+        // the primary, which is why the origin is read rather than assumed.
+        //
+        // The path goes in single quotes, where PowerShell treats a backslash
+        // literally, so only the quote character needs escaping.
         let script = format!(
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; \
+             $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; \
              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
              $g = [System.Drawing.Graphics]::FromImage($bmp); \
              $g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size); \
              $bmp.Save('{}'); $g.Dispose(); $bmp.Dispose()",
-            target.to_string_lossy().replace('\\', "\\\\")
+            target.to_string_lossy().replace('\'', "''")
         );
         let status = crate::proc::command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -507,6 +535,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
 
     #[cfg(target_os = "macos")]
     {
+        // No `-D`, so every display lands in one image.
         crate::proc::command("screencapture")
             .args(["-x", &target.to_string_lossy()])
             .output()
@@ -516,6 +545,7 @@ async fn capture_screen() -> Result<PathBuf, String> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        // The X root window spans all attached outputs.
         crate::proc::command("import")
             .args(["-window", "root", &target.to_string_lossy()])
             .output()
@@ -523,10 +553,44 @@ async fn capture_screen() -> Result<PathBuf, String> {
             .map_err(|e| format!("screen capture needs ImageMagick's `import`: {e}"))?;
     }
 
-    if target.exists() {
-        Ok(target)
-    } else {
-        Err("screen capture produced no file".into())
+    if !target.exists() {
+        return Err("screen capture produced no file".into());
+    }
+    Ok(shrink_for_vision(&target))
+}
+
+/// Longest edge of a screenshot handed to a model, in pixels.
+///
+/// Two 2560-wide monitors side by side is a 5120-pixel image and several
+/// megabytes of base64 in the request body. No vision model reads at that
+/// resolution — they downscale internally — so sending it buys nothing and
+/// costs upload time and context.
+const MAX_SHOT_EDGE: u32 = 1920;
+
+/// Scale a capture down if it is larger than any model will use.
+///
+/// Returns the original path when it is already small enough, or when
+/// re-encoding fails: a picture that is too big is still better than none.
+fn shrink_for_vision(path: &Path) -> PathBuf {
+    let Ok(reader) = image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) else {
+        return path.to_path_buf();
+    };
+    let Ok(decoded) = reader.decode() else {
+        return path.to_path_buf();
+    };
+    if decoded.width() <= MAX_SHOT_EDGE && decoded.height() <= MAX_SHOT_EDGE {
+        return path.to_path_buf();
+    }
+    // `resize` rather than `thumbnail`: text on a screen has to stay readable,
+    // and the fast path's nearest-neighbour sampling turns it to noise.
+    let scaled = decoded.resize(
+        MAX_SHOT_EDGE,
+        MAX_SHOT_EDGE,
+        image::imageops::FilterType::CatmullRom,
+    );
+    match scaled.save(path) {
+        Ok(()) => path.to_path_buf(),
+        Err(_) => path.to_path_buf(),
     }
 }
 

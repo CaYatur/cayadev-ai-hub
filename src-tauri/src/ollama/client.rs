@@ -73,11 +73,59 @@ pub struct Timeouts {
 
 impl Default for Timeouts {
     fn default() -> Self {
-        // 10 min covers a cold 27B load (~30 s) plus a long prefill with wide
-        // margin. The inter-token budget is 180 s rather than 60 because a
-        // spilled 27B running at 4 tok/s with a full context pauses longer than
-        // expected between chunks, and cutting it there lost real work.
+        // Sized for a model that fits in VRAM. A model that does not gets
+        // [`Timeouts::for_throughput`] instead — see there for why the
+        // difference is nearly an order of magnitude.
         Self { connect: 5, first_token: 600, idle: 180 }
+    }
+}
+
+/// How often a wait reports that it is still waiting.
+///
+/// Short enough that the status line moves, long enough not to flood the
+/// channel during a ten-minute generation.
+const HEARTBEAT: Duration = Duration::from_secs(10);
+
+impl Timeouts {
+    /// Budgets scaled to how fast the model actually runs.
+    ///
+    /// `tokens_per_second` is what the model was measured at, or an estimate
+    /// from its placement. This exists because one number cannot serve both
+    /// ends of the range: `qwen2.5-coder:7b` decodes at 42 tok/s and a
+    /// three-minute silence from it means something is broken, while
+    /// `qwen3.8:27b` spilled to system RAM decodes at 5.4 and a single long
+    /// reply is a quarter of an hour of work — during which a fixed 180 s
+    /// budget cut it off and lost everything it had done.
+    ///
+    /// The idle budget is the time to produce [`STALL_TOKENS`] tokens at that
+    /// rate: enough that a working model is never mistaken for a dead one, and
+    /// short enough that a genuinely dead connection is still noticed.
+    pub fn for_throughput(tokens_per_second: f64) -> Self {
+        /// Tokens' worth of silence tolerated before calling it a stall.
+        ///
+        /// The unit is work, not time, because the silence is not really "no
+        /// tokens" — it is tokens being generated and not sent. Measured on
+        /// `qwen3.8:27b-mtp-q4_K_M`: reasoning streams normally, then the whole
+        /// tool call is buffered and arrives as one chunk. Asked for a
+        /// single-file HTML page it went **547 seconds** between the last
+        /// reasoning chunk and that one, and a 180 s budget threw the work away
+        /// twice. 4096 covers a long file written in one call.
+        const STALL_TOKENS: f64 = 4096.0;
+        /// Never shorter than this, however fast the model is.
+        const MIN_IDLE: u64 = 180;
+        /// Never longer than this, however slow: past half an hour of silence
+        /// the run is not worth holding open.
+        const MAX_IDLE: u64 = 1800;
+
+        let rate = tokens_per_second.max(0.5);
+        let idle = (STALL_TOKENS / rate).round() as u64;
+        Self {
+            connect: 5,
+            // Loading 17 GB of weights from disk and prefilling a full window
+            // is minutes on a spilled model, and it is not a failure.
+            first_token: 900,
+            idle: idle.clamp(MIN_IDLE, MAX_IDLE),
+        }
     }
 }
 
@@ -89,6 +137,11 @@ pub enum StreamEvent {
     Token { text: String },
     /// Incremental reasoning text, on thinking-capable models.
     Thinking { text: String },
+    /// Nothing has arrived for a while, and the run is still waiting.
+    ///
+    /// Not an error. Emitted so a silence has a visible reason: a model loading,
+    /// or one generating a tool call it will not send until it is complete.
+    Silence { seconds: u64, first_token: bool },
     /// Terminal event carrying the assembled message and timings.
     Done { message: Message, metrics: Metrics, done_reason: Option<String> },
     Error { message: String },
@@ -110,6 +163,15 @@ impl OllamaClient {
             .build()
             .expect("reqwest client construction cannot fail with these options");
         Self { base_url: base_url.into(), http, timeouts }
+    }
+
+    /// The same client with different budgets.
+    ///
+    /// The connection pool is shared — `reqwest::Client` is a handle — so this
+    /// is cheap enough to do per run, which is what sizing budgets to the
+    /// chosen model requires.
+    pub fn with_timeouts(&self, timeouts: Timeouts) -> Self {
+        Self { base_url: self.base_url.clone(), http: self.http.clone(), timeouts }
     }
 
     pub fn base_url(&self) -> &str {
@@ -281,28 +343,53 @@ impl OllamaClient {
         loop {
             let budget = if seen_any { self.timeouts.idle } else { self.timeouts.first_token };
 
-            // `biased` so cancellation wins a tie rather than being subject to
-            // random branch order.
-            let next = tokio::select! {
-                biased;
-                _ = cancelled(&cancel) => {
-                    // Dropping `stream` here closes the connection, so the
-                    // daemon stops generating too.
-                    return Err(OllamaError::Cancelled);
+            // Wait for the next chunk, saying so while it does not come.
+            //
+            // A silence here is usually the model working, not the model dying:
+            // some templates buffer a whole tool call and send it in one piece,
+            // so a file being written produces nothing at all until it is
+            // finished. Waiting the entire budget in silence makes a working
+            // app look hung, so the wait is broken into ticks and each one
+            // reports how long it has been quiet.
+            let silent_since = Instant::now();
+            let next = loop {
+                // `biased` so cancellation wins a tie rather than being subject
+                // to random branch order.
+                let tick = tokio::select! {
+                    biased;
+                    _ = cancelled(&cancel) => {
+                        // Dropping `stream` here closes the connection, so the
+                        // daemon stops generating too.
+                        return Err(OllamaError::Cancelled);
+                    }
+                    read = tokio::time::timeout(HEARTBEAT, stream.next()) => read,
+                };
+                match tick {
+                    Ok(chunk) => break Some(chunk),
+                    Err(_) => {
+                        let quiet = silent_since.elapsed().as_secs();
+                        if quiet >= budget {
+                            break None;
+                        }
+                        let _ = tx
+                            .send(StreamEvent::Silence { seconds: quiet, first_token: !seen_any })
+                            .await;
+                    }
                 }
-                read = tokio::time::timeout(Duration::from_secs(budget), stream.next()) => read,
             };
 
             let chunk = match next {
-                Err(_) => {
+                None => {
                     // The two cases want different advice. Nothing at all means
                     // the weights are still being loaded, or do not fit; a gap
-                    // part-way through means they fit badly and are being paged.
+                    // part-way through means the model is generating something
+                    // it does not stream, or it is being paged.
                     let message = if seen_any {
                         format!(
-                            "The reply stopped after {budget}s with nothing further. \
-                             A model larger than the graphics card pages its weights \
-                             in and out mid-reply; a smaller one will not."
+                            "Nothing further for {budget}s. Some models send a whole \
+                             tool call in one piece, so writing a long file is silent \
+                             — but not this long. A model that does not fit in VRAM \
+                             is the usual reason."
                         )
                     } else {
                         format!(
@@ -314,9 +401,9 @@ impl OllamaClient {
                     let _ = tx.send(StreamEvent::Error { message }).await;
                     return Err(OllamaError::Stalled { seconds: budget, model });
                 }
-                Ok(None) => break,
-                Ok(Some(Err(e))) => return Err(OllamaError::Transport(e)),
-                Ok(Some(Ok(bytes))) => bytes,
+                Some(None) => break,
+                Some(Some(Err(e))) => return Err(OllamaError::Transport(e)),
+                Some(Some(Ok(bytes))) => bytes,
             };
 
             seen_any = true;
@@ -386,5 +473,53 @@ impl OllamaClient {
             .await;
 
         Ok(final_resp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spilled_model_gets_the_silence_it_actually_needs() {
+        // The measured failure: qwen3.8:27b spilled to system RAM decodes at
+        // 5.4 tok/s and went 547 seconds between its last reasoning chunk and
+        // the buffered tool call carrying a whole HTML file. A budget under
+        // that throws the work away.
+        let t = Timeouts::for_throughput(5.4);
+        assert!(t.idle > 547, "budget {} would have cut off a real run", t.idle);
+    }
+
+    #[test]
+    fn a_resident_model_is_not_given_a_quarter_of_an_hour() {
+        // At 42 tok/s a three-minute silence is a fault, not work in progress.
+        let t = Timeouts::for_throughput(42.3);
+        assert_eq!(t.idle, 180);
+    }
+
+    #[test]
+    fn the_budget_is_bounded_at_both_ends() {
+        // A nonsensical rate must not produce a zero budget or an endless one.
+        assert_eq!(Timeouts::for_throughput(0.0).idle, 1800);
+        assert_eq!(Timeouts::for_throughput(-5.0).idle, 1800);
+        assert_eq!(Timeouts::for_throughput(f64::MAX).idle, 180);
+        assert!(Timeouts::for_throughput(1.0).idle <= 1800);
+    }
+
+    #[test]
+    fn slower_models_always_get_at_least_as_long() {
+        let mut previous = 0;
+        for rate in [200.0, 60.0, 40.0, 20.0, 10.0, 5.0, 2.0, 1.0] {
+            let idle = Timeouts::for_throughput(rate).idle;
+            assert!(idle >= previous, "{rate} tok/s got {idle}s, less than a faster model");
+            previous = idle;
+        }
+    }
+
+    #[test]
+    fn loading_a_large_model_is_never_the_thing_that_fails() {
+        // Weights come off disk once per run at worst; fifteen minutes covers a
+        // 17 GB model and a full prefill.
+        assert!(Timeouts::for_throughput(5.0).first_token >= 900);
     }
 }

@@ -10,6 +10,8 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-dc2626.svg)](https://tauri.app)
 [![Ollama](https://img.shields.io/badge/Ollama-0.32%2B-dc2626.svg)](https://ollama.com)
 
+<img src="docs/media/chat.png" width="880" alt="A session in progress: reasoning folded away, two tool calls, and a markdown reply with syntax-coloured code">
+
 </div>
 
 ---
@@ -108,6 +110,19 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
 - Replies rendered as markdown, with syntax colouring and links that open —
   a web link in the browser, a file path in its application
 - Turkish and English interface, Turkish by default
+
+## Screens
+
+| | |
+| --- | --- |
+| <img src="docs/media/models.png" alt="Installed models"> | <img src="docs/media/activity.png" alt="Activity"> |
+| **Models** — what each one is, where it will actually run, and which task it is routed to. Placement is read from the GPU driver. | **Activity** — every file change with a revert button, every decision with the reason the engine gave. |
+| <img src="docs/media/vision.png" alt="A screenshot question"> | <img src="docs/media/chat.png" alt="Chat"> |
+| **Seeing the screen** — "what is open on my computer?" goes to a model that can look, not to a search. | **Chat** — collapsed tool rows, folded reasoning, live tok/s and context occupancy. |
+
+Screenshots are the app itself, rendered over an example transcript by
+`scripts/demo/` — the models, sizes and throughput figures in them are the
+measured ones from [`BENCHMARKS.md`](docs/BENCHMARKS.md).
 
 ## Requirements
 
