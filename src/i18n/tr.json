@@ -42,7 +42,8 @@
     "words": "kelime",
     "detach": "Kaldır",
     "dropHint": "Eklemek için dosyaları bırakın",
-    "pasted": "yapıştırılan görsel"
+    "pasted": "yapıştırılan görsel",
+    "jumpLatest": "En sona git"
   },
   "approval": {
     "title": "{{tool}} onaylansın mı?",

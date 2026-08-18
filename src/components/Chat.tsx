@@ -20,6 +20,7 @@ import {
   type Entry,
   type Session,
 } from "../lib/sessions";
+import { Markdown } from "./Markdown";
 import { Popover, PopoverDivider, PopoverItem, PopoverLabel } from "./Popover";
 
 const MODES: PermissionMode[] = [
@@ -90,6 +91,16 @@ function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
 function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const body = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+
+  // The reasoning box scrolls inside itself, so following the transcript is not
+  // enough — without this the text streams on out of sight below the fold.
+  useEffect(() => {
+    if (!open || !follow.current) return;
+    const el = body.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [text, open]);
 
   return (
     <div className={open ? "thinking thinking-open" : "thinking"}>
@@ -100,7 +111,21 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
         </span>
         <span className="thinking-size">{text.trim().split(/\s+/).length}</span>
       </button>
-      {open && <div className="thinking-body">{text}</div>}
+      {open && (
+        <div
+          className="thinking-body"
+          ref={body}
+          // Reading back through the reasoning while it is still being written
+          // must not be yanked away; scrolling up stops the follow until the
+          // user returns to the bottom.
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+          }}
+        >
+          {text}
+        </div>
+      )}
     </div>
   );
 }
@@ -270,7 +295,8 @@ export default function Chat({
   const [menu, setMenu] = useState<"mode" | "model" | "effort" | "ctx" | null>(null);
   const [ctxOptions, setCtxOptions] = useState<ContextOptions | null>(null);
   const [tick, setTick] = useState(0);
-  const bottom = useRef<HTMLDivElement>(null);
+  const transcript = useRef<HTMLDivElement>(null);
+  const [atBottom, setAtBottom] = useState(true);
 
   // A clock that only advances between steps is not a clock.
   useEffect(() => {
@@ -284,9 +310,48 @@ export default function Chat({
   const totalTokens = session.tokens + liveTokens;
   void tick;
 
+  /// Live decode rate, timed from the first token rather than from the button.
+  ///
+  /// Counting from when the run started would fold a thirty-second model load
+  /// into the average and report six tok/s for a model doing forty.
+  const firstTokenAt = useRef<number | null>(null);
+  const tokensAtStart = useRef(0);
+  if (runStartedAt === null) {
+    firstTokenAt.current = null;
+    tokensAtStart.current = 0;
+  } else if (firstTokenAt.current === null && liveTokens > 0) {
+    firstTokenAt.current = Date.now();
+    tokensAtStart.current = liveTokens;
+  }
+  const sinceFirst = firstTokenAt.current ? (Date.now() - firstTokenAt.current) / 1000 : 0;
+  const liveRate =
+    sinceFirst > 0.6 ? (liveTokens - tokensAtStart.current) / sinceFirst : null;
+  // While a run is in flight the live figure is the true one; between runs the
+  // daemon's own count from the last step is more accurate than our estimate.
+  const rate = liveRate ?? session.lastRate;
+
+  // The last entry grows token by token without the entry count changing, so
+  // its length is what tells this effect that there is new text on screen.
+  const last = session.entries[session.entries.length - 1];
+  const tailLength =
+    last === undefined
+      ? 0
+      : last.kind === "tool"
+        ? (last.output?.length ?? 0)
+        : last.text.length;
+
+  /// Follow the newest output, unless the user has scrolled away from it.
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [session.entries.length, pending]);
+    if (!atBottom) return;
+    const el = transcript.current;
+    if (!el) return;
+    // After paint, and without smoothing: a smooth scroll restarted by the next
+    // token never arrives, which is what made this feel unreliable.
+    const id = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [session.entries.length, tailLength, pending, running, atBottom]);
 
   // Cloud models report no capability metadata, so filtering on `tools` would
   // hide them entirely. They are listed and labelled instead — whether tool
@@ -371,7 +436,17 @@ export default function Chat({
         </div>
       )}
 
-      <div className="transcript">
+      <div
+        className="transcript"
+        ref={transcript}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          // A threshold rather than an exact match: sub-pixel layout means the
+          // numbers rarely land on zero even when the view is at the bottom.
+          const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          setAtBottom((was) => (was === near ? was : near));
+        }}
+      >
         {session.entries.length === 0 && (
           <div className="empty">
             <div className="empty-mark">▮</div>
@@ -405,7 +480,7 @@ export default function Chat({
           if (entry.kind === "assistant") {
             return entry.text.trim() ? (
               <div key={i} className="turn turn-assistant">
-                {entry.text}
+                <Markdown text={entry.text} />
               </div>
             ) : null;
           }
@@ -424,7 +499,18 @@ export default function Chat({
             <span className="pulse" /> {t("chat.working")}
           </div>
         )}
-        <div ref={bottom} />
+        {!atBottom && (
+          <button
+            className="jump-latest"
+            onClick={() => {
+              const el = transcript.current;
+              if (el) el.scrollTop = el.scrollHeight;
+              setAtBottom(true);
+            }}
+          >
+            {t("chat.jumpLatest")} ↓
+          </button>
+        )}
       </div>
 
       {pending && (
@@ -548,7 +634,14 @@ export default function Chat({
               disabled={!ctxOptions}
               title={ctxOptions ? t("context.label") : t("context.pickModel")}
             >
-              <ContextMeter used={session.contextUsed} limit={limit} trainedMax={trainedMax} />
+              <ContextMeter
+                // The daemon reports the window's true occupancy only when a
+                // step finishes. Adding what has streamed since keeps the meter
+                // moving during the step, which is the only time it matters.
+                used={session.contextUsed + (running ? liveTokens : 0)}
+                limit={limit}
+                trainedMax={trainedMax}
+              />
             </button>
             <Popover open={menu === "ctx"} onClose={() => setMenu(null)} width={270}>
               <PopoverLabel>{t("context.label")}</PopoverLabel>
@@ -671,10 +764,12 @@ export default function Chat({
           <span>{formatElapsed(elapsedMs)}</span>
           <span className="sep">·</span>
           <span>{formatTokens(totalTokens)} {t("chat.used")}</span>
-          {session.lastRate !== null && (
+          {rate !== null && (
             <>
               <span className="sep">·</span>
-              <span className="status-rate">{session.lastRate.toFixed(1)} tok/s</span>
+              <span className={liveRate !== null ? "status-rate status-rate-live" : "status-rate"}>
+                {rate.toFixed(1)} tok/s
+              </span>
             </>
           )}
           {running && (

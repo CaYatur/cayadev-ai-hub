@@ -169,8 +169,17 @@ export async function onFileDrop(
   });
 }
 
+/// Size in the largest unit that leaves a number worth reading.
+///
+/// This used to stop at MB with no decimals, because it was written for model
+/// weights. Reused for attachments it reported every screenshot and text file
+/// as "0 MB".
 export function formatBytes(n: number): string {
   if (!n) return "—";
-  const gb = n / 1024 ** 3;
-  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(n / 1024 ** 2).toFixed(0)} MB`;
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
 }

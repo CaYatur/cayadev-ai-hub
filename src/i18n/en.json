@@ -42,7 +42,8 @@
     "words": "words",
     "detach": "Remove",
     "dropHint": "Drop files to attach them",
-    "pasted": "pasted image"
+    "pasted": "pasted image",
+    "jumpLatest": "Jump to latest"
   },
   "approval": {
     "title": "Approve {{tool}}?",
