@@ -108,7 +108,7 @@ impl MediaTools {
     /// fails with a readable message rather than silently doing nothing.
     fn sidecar(&self, name: &str) -> PathBuf {
         if let Some(dir) = &self.resource_dir {
-            for candidate in [dir.join("scripts").join(name), dir.join(name)] {
+            for candidate in resource_candidates(dir, name) {
                 if candidate.exists() {
                     return candidate;
                 }
@@ -465,6 +465,20 @@ impl MediaTools {
     }
 }
 
+/// Places a bundled sidecar can end up, in order of likelihood.
+///
+/// Tauri rewrites a resource declared as `../scripts/extract.py` into
+/// `_up_/scripts/extract.py` beneath the resource directory — the `..` becomes
+/// a literal `_up_` segment. Missing that is silent: the tool advertises
+/// itself because Python is installed, then fails with "no such file".
+fn resource_candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![
+        dir.join("_up_").join("scripts").join(name),
+        dir.join("scripts").join(name),
+        dir.join(name),
+    ]
+}
+
 /// Capture the primary display to a temporary PNG.
 async fn capture_screen() -> Result<PathBuf, String> {
     let target = std::env::temp_dir().join(format!("cayahub-shot-{}.png", uuid::Uuid::new_v4()));
@@ -585,6 +599,25 @@ mod tests {
 
     fn args(v: Value) -> Map<String, Value> {
         serde_json::from_value(v).expect("object")
+    }
+
+    #[test]
+    fn a_bundled_sidecar_is_found_where_tauri_puts_it() {
+        // The bundler turns `../scripts/extract.py` into `_up_/scripts/...`,
+        // which the first version of this lookup did not check — so the
+        // packaged build would have advertised the tool and then failed.
+        let dir = std::env::temp_dir().join(format!("cayahub-res-{}", uuid::Uuid::new_v4()));
+        let bundled = dir.join("_up_").join("scripts");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("extract.py"), "# stub").unwrap();
+
+        let found = resource_candidates(&dir, "extract.py")
+            .into_iter()
+            .find(|p| p.exists())
+            .expect("bundled sidecar should be found");
+        assert_eq!(found, bundled.join("extract.py"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
