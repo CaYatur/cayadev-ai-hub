@@ -74,6 +74,11 @@ and is derived from whichever models you actually have installed.
 - `qwen3.8:27b-mtp-q4_K_M` resolves to the same digest as `qwen3.8:latest` —
   the default build already carries the MTP head, so there is no separate
   speculative-decoding variant to switch to.
+- **The spilled 27B's rate depends on what else is using the GPU.** It
+  measured 4.5-5.9 tok/s early in a session and 8.4-9.1 tok/s later the same
+  day. VRAM held by other applications moved from 1787 MiB to 5696 MiB over
+  that period, changing how many layers landed on the GPU. Treat any single
+  reading of a spilled model as +/-30%, and see [SPEED.md](SPEED.md).
 - Laptop GPU throughput is not stable run-to-run. The 7B measured 30.6 tok/s
   once (first run after a model swap), 42–46 across three later warm runs, and
   57 twice at larger contexts. Any single reading here is worth ±25%; the

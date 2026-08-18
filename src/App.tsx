@@ -1,82 +1,260 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Chat from "./components/Chat";
 import Models from "./components/Models";
-import { api, type ModelProfile } from "./lib/agent";
+import Sidebar from "./components/Sidebar";
+import { api, subscribe, type AgentEvent, type ModelProfile, type ProposedCall } from "./lib/agent";
+import {
+  applyMetrics,
+  load,
+  newSession,
+  save,
+  titleFrom,
+  type Entry,
+  type Session,
+} from "./lib/sessions";
 import "./styles/app.css";
 
-type Tab = "chat" | "models";
+type View = "chat" | "models";
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("chat");
+  const [sessions, setSessions] = useState<Session[]>(() => {
+    const stored = load();
+    return stored.length > 0 ? stored : [newSession()];
+  });
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [view, setView] = useState<View>("chat");
   const [models, setModels] = useState<ModelProfile[]>([]);
   const [routing, setRouting] = useState<Record<string, string> | null>(null);
   const [version, setVersion] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [pending, setPending] = useState<ProposedCall | null>(null);
 
-  const load = useCallback(async () => {
+  // The event stream is global, so handlers need the current session id without
+  // being torn down and resubscribed on every switch.
+  const activeRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeRef.current = activeId ?? sessions[0]?.id ?? null;
+  }, [activeId, sessions]);
+
+  useEffect(() => {
+    if (!activeId && sessions.length > 0) setActiveId(sessions[0].id);
+  }, [activeId, sessions]);
+
+  useEffect(() => {
+    save(sessions);
+  }, [sessions]);
+
+  const active = sessions.find((s) => s.id === activeId) ?? sessions[0];
+
+  const patch = useCallback((id: string, fn: (s: Session) => Session) => {
+    setSessions((prev) => prev.map((s) => (s.id === id ? fn(s) : s)));
+  }, []);
+
+  const append = useCallback(
+    (id: string, entry: Entry) => {
+      patch(id, (s) => ({ ...s, entries: [...s.entries, entry] }));
+    },
+    [patch],
+  );
+
+  const loadModels = useCallback(async () => {
     try {
       setVersion(await api.version());
       const list = await api.listModels();
       setModels([...list].sort((a, b) => a.weights_bytes - b.weights_bytes));
-      // Depends on list_models having populated state, so it runs after.
       setRouting((await api.routing()).assignments);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      setVersion(null);
     }
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadModels();
+  }, [loadModels]);
 
-  const refreshVram = useCallback(async () => {
-    try {
-      await api.refreshVram();
-      await load();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [load]);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+
+    subscribe(
+      (event: AgentEvent) => {
+        const id = activeRef.current;
+        if (!id) return;
+
+        switch (event.kind) {
+          case "token":
+            patch(id, (s) => {
+              const entries = [...s.entries];
+              const last = entries[entries.length - 1];
+              // Append to the open assistant turn rather than starting a new one.
+              if (last?.kind === "assistant") {
+                entries[entries.length - 1] = { ...last, text: last.text + event.text };
+              } else {
+                entries.push({ kind: "assistant", text: event.text });
+              }
+              return { ...s, entries };
+            });
+            break;
+
+          case "tool_proposed":
+            append(id, { kind: "tool", call: event.call });
+            break;
+
+          case "tool_settled":
+            patch(id, (s) => {
+              const entries = [...s.entries];
+              for (let i = entries.length - 1; i >= 0; i--) {
+                const e = entries[i];
+                if (e.kind === "tool" && e.call.id === event.id) {
+                  entries[i] = { ...e, output: event.output, settled: event.outcome };
+                  break;
+                }
+              }
+              return { ...s, entries };
+            });
+            break;
+
+          case "step_done":
+            patch(id, (s) => applyMetrics(s, event.metrics));
+            break;
+
+          case "error":
+            append(id, { kind: "notice", text: event.message, tone: "error" });
+            break;
+
+          case "done":
+            if (event.reason !== "Completed") {
+              append(id, { kind: "notice", text: `Stopped: ${event.reason}`, tone: "info" });
+            }
+            break;
+        }
+      },
+      (call) => setPending(call),
+    ).then((fn) => {
+      off = fn;
+    });
+
+    return () => off?.();
+  }, [append, patch]);
+
+  const setWorkspace = useCallback(
+    async (path: string) => {
+      if (!active) return;
+      try {
+        const resolved = await api.setWorkspace(path);
+        patch(active.id, (s) => ({ ...s, workspace: resolved }));
+      } catch (e) {
+        append(active.id, { kind: "notice", text: String(e), tone: "error" });
+      }
+    },
+    [active, patch, append],
+  );
+
+  const send = useCallback(
+    async (text: string, model?: string) => {
+      if (!active) return;
+      const id = active.id;
+
+      patch(id, (s) => ({
+        ...s,
+        title: s.entries.length === 0 ? titleFrom(text) : s.title,
+        entries: [...s.entries, { kind: "user", text }],
+      }));
+      setRunning(true);
+      try {
+        await api.run(text, model);
+      } catch (e) {
+        append(id, { kind: "notice", text: String(e), tone: "error" });
+      } finally {
+        setRunning(false);
+        setPending(null);
+      }
+    },
+    [active, patch, append],
+  );
+
+  const answer = useCallback(
+    async (approved: boolean) => {
+      if (!pending) return;
+      await api.resolveApproval(pending.id, approved);
+      setPending(null);
+    },
+    [pending],
+  );
+
+  const cancel = useCallback(async () => {
+    await api.cancel();
+    setPending(null);
+  }, []);
+
+  const startSession = useCallback(() => {
+    // Carry the folder over — a new session in the same project is the norm.
+    const created = newSession(active?.workspace ?? null);
+    setSessions((prev) => [created, ...prev]);
+    setActiveId(created.id);
+    setView("chat");
+  }, [active]);
+
+  const deleteSession = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        const next = prev.filter((s) => s.id !== id);
+        return next.length > 0 ? next : [newSession()];
+      });
+      setActiveId((current) => (current === id ? null : current));
+    },
+    [],
+  );
 
   return (
     <div className="shell">
-      <header className="topbar">
-        <div className="brand">
-          CaYa<span>Dev</span> AI Hub
-        </div>
-        <nav className="tabs">
+      <Sidebar
+        sessions={sessions}
+        activeId={active?.id ?? null}
+        onSelect={(id) => {
+          setActiveId(id);
+          setView("chat");
+        }}
+        onNew={startSession}
+        onDelete={deleteSession}
+        version={version}
+      />
+
+      <div className="main">
+        <div className="viewbar">
           <button
-            className={tab === "chat" ? "tab tab-active" : "tab"}
-            onClick={() => setTab("chat")}
+            className={view === "chat" ? "viewtab viewtab-on" : "viewtab"}
+            onClick={() => setView("chat")}
           >
             Agent
           </button>
           <button
-            className={tab === "models" ? "tab tab-active" : "tab"}
-            onClick={() => setTab("models")}
+            className={view === "models" ? "viewtab viewtab-on" : "viewtab"}
+            onClick={() => setView("models")}
           >
             Models
           </button>
-        </nav>
-        <div className="topbar-meta">
-          {version ? `Ollama ${version}` : "connecting…"}
         </div>
-      </header>
 
-      {error && (
-        <div className="state state-error">
-          Could not reach Ollama. <span className="muted">{error}</span>
-        </div>
-      )}
-
-      {tab === "chat" ? (
-        <Chat models={models} />
-      ) : (
-        <main className="content">
-          <Models models={models} routing={routing} onRefreshVram={refreshVram} />
-        </main>
-      )}
+        {view === "chat" && active ? (
+          <Chat
+            session={active}
+            models={models}
+            running={running}
+            pending={pending}
+            onSend={send}
+            onAnswer={answer}
+            onWorkspace={setWorkspace}
+            onCancel={cancel}
+          />
+        ) : (
+          <main className="content">
+            <Models models={models} routing={routing} onRefreshVram={async () => {
+              await api.refreshVram();
+              await loadModels();
+            }} />
+          </main>
+        )}
+      </div>
     </div>
   );
 }

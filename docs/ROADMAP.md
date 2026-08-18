@@ -47,6 +47,38 @@ everything else is not built yet, however well specified it looks.
 - Credential paths and catastrophic commands refused in *every* mode, including
   unrestricted
 
+### Agent loop — `src-tauri/src/agent/runner.rs`
+- Runs to completion against real models: 54-61 tok/s on `qwen2.5-coder:7b`
+- Schema validation before execution, naming the missing argument
+- Loop detection on the call signature, which is what stops a 0.5B model
+  cycling read_file -> edit_file -> run_command until the budget runs out
+- Step budget, cancellation, streamed events
+
+### Tools — `src-tauri/src/tools/`
+- read_file, write_file, edit_file, list_dir, run_command
+- Paths resolved and normalised *before* the permission engine sees them
+- Output capped so a large file cannot consume a small model's whole context
+- `edit_file` refuses an ambiguous match rather than replacing the first of
+  several occurrences
+
+### Model-assisted approval — `src-tauri/src/agent/approver.rs`
+- Can only turn Ask into Allow; never sees Deny, Destructive, Catastrophic, or
+  anything leaving the workspace
+- Input is computed facts only, each sanitised to a short alphanumeric token
+- Output must be the single word ALLOW, matched exactly
+- 188 ms per decision on the routed classifier
+- Injection tests assert a hostile payload produces byte-identical input
+
+### Desktop UI
+- Streaming chat, per-call tool cards, approve/reject bar
+- Notes when the parser rescued a malformed call
+- Permission-mode selector with a typed confirmation for Unrestricted
+- Model list with placement, routing table, GPU re-read
+
+### GPU probing — `src-tauri/src/ollama/gpu.rs`
+- Budget read from `nvidia-smi` rather than assumed, fixing a wrong routing
+  decision caused by the old fixed reserve
+
 ### Measurement
 - Reproducible benchmark harness (`scripts/bench.py`) that pins `num_ctx` and
   records the placement the daemon actually chose
@@ -54,29 +86,28 @@ everything else is not built yet, however well specified it looks.
 
 ## Known gaps
 
-- **The VRAM budget is assumed, not probed.** It defaults to 8 GB total with
-  2 GB reserved. On the development machine that marks `qwen3-vl:8b` (5.7 GB)
-  as spilled, but it was measured running fully on the GPU at 21 tok/s — the
-  reserve is too pessimistic by a few hundred megabytes. A real probe of free
-  VRAM is the fix; until then `set_vram_budget` lets the UI correct it.
-- Because of that, vision currently routes to the only model the estimate calls
-  resident, which is smaller than ideal for image work. Recalibrating the budget
-  should change that decision on its own.
+- **GPU probing is NVIDIA-only.** AMD and Intel hosts fall back to the fixed
+  assumption. `refresh_vram_budget` returns an error there, and the UI should
+  offer a manual figure.
+- **No checkpoints yet**, so an agent edit is not undoable from inside the app.
+  Use git.
+- **Windows-only testing.** Nothing is deliberately platform-specific, but the
+  path and command tests have only been exercised on Windows.
+- **The UI has not been driven by hand end to end.** The Rust layer is covered
+  by live tests and the frontend typechecks with command and event names
+  cross-checked against Rust, but no one has clicked through a full session.
 
 ## Next
 
 In dependency order.
 
-1. **Agent runner** — the loop tying model, tools, and permissions together;
-   step budgets, retry-with-repair on malformed calls, cancellation
-2. **Tool surface** — file read/write/edit, directory listing, search, command
-   execution with streamed output
-3. **Tauri command layer** — expose the core to the frontend, stream events
-4. **Desktop UI** — chat with streaming, tool-call cards with approve/deny,
-   model picker showing real context and placement, permission-mode banner
-5. **i18n** — Turkish and English, Turkish default
-6. **Checkpoints** — content-addressed undo of agent file changes, stored in the
-   project directory, deduplicated so history stays small
+1. **Checkpoints** — content-addressed undo of agent file changes, stored in
+   the project directory, deduplicated so history stays small
+2. **i18n** — Turkish and English, Turkish default
+3. **Search tool** — content and filename search, which the agent currently
+   lacks and works around with `run_command`
+4. **Streamed command output** — long-running commands currently return only
+   when they finish
 
 ## Later
 

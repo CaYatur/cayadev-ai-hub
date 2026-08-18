@@ -69,6 +69,7 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
 - Stable prompt prefixes so the daemon reuses its KV cache instead of
   re-prefilling every turn
 - `keep_alive` management so big models are not reloaded between turns
+- GPU memory read from the driver, not assumed — see [`docs/SPEED.md`](docs/SPEED.md)
 
 **Safety**
 - Four permission modes, from read-only to unrestricted
@@ -78,7 +79,9 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
   its worst segment, not its first
 - Credential paths and catastrophic commands refused in *every* mode, including
   unrestricted
-- Full audit log of what was auto-approved, what was asked, and what was refused
+- Optional model-assisted approval that can *only* turn "ask" into "allow", is
+  never shown a destructive call, and receives computed facts rather than any
+  attacker-controllable text
 
 ## Status
 
@@ -101,9 +104,12 @@ Measured on the development machine, in a scratch directory:
 body with an empty `tool_calls` field.** Without tolerant parsing this agent
 would do nothing at all — which is the whole thesis, confirmed end to end.
 
-**There is no chat UI yet** — the app lists models but you drive the agent from
-tests. That, and the wider tool surface, are next; see
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+The desktop app has a streaming chat, per-call tool cards, an approve/reject
+bar, and a permission-mode selector. What it does **not** have yet: checkpoints
+(use git), Turkish/English i18n, and a search tool. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the honest split, and
+[`docs/SPEED.md`](docs/SPEED.md) for what does and does not make local models
+faster.
 
 ## Requirements
 

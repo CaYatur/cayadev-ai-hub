@@ -1,118 +1,96 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { api, type ModelProfile, type PermissionMode, type ProposedCall } from "../lib/agent";
 import {
-  api,
-  subscribe,
-  type AgentEvent,
-  type ModelProfile,
-  type PermissionMode,
-  type ProposedCall,
-  type Recovery,
-} from "../lib/agent";
-
-/** One entry in the transcript. Tool calls are entries too, not annotations. */
-type Entry =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
-  | { kind: "tool"; call: ProposedCall; output?: string; settled?: string }
-  | { kind: "notice"; text: string; tone: "info" | "error" };
+  formatElapsed,
+  formatTokens,
+  summarize,
+  RECOVERY_NOTE,
+  type Entry,
+  type Session,
+} from "../lib/sessions";
 
 const MODE_LABELS: Record<PermissionMode, { name: string; hint: string }> = {
-  read_only: { name: "Read only", hint: "Reads run; writes and commands are confirmed." },
-  project_auto: { name: "Project auto", hint: "Reads and writes in the folder run; commands are confirmed." },
-  balanced: { name: "Balanced", hint: "Also runs commands the rules classify as read-only." },
-  unrestricted: { name: "Unrestricted", hint: "Runs almost everything without asking. Risky." },
+  read_only: { name: "Read only", hint: "Reads run. Writes and commands are confirmed." },
+  project_auto: { name: "Project auto", hint: "Reads and writes in the folder run. Commands are confirmed." },
+  balanced: { name: "Balanced", hint: "Also runs commands classified as read-only." },
+  unrestricted: { name: "Unrestricted", hint: "Runs almost everything unattended. Risky." },
 };
 
-/** Only shown when it is not `native` — that is when the parser did the work. */
-const RECOVERY_NOTE: Partial<Record<Recovery, string>> = {
-  xml_tag: "recovered from <tool_call> tags",
-  code_fence: "recovered from a code block",
-  loose_json: "recovered from bare JSON",
-  function_tag: "recovered from a <function=> tag",
-  python_call: "recovered from Python-style syntax",
-};
+/** A tool call, collapsed to one scannable line until the user opens it. */
+function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+  const [open, setOpen] = useState(false);
+  const note = RECOVERY_NOTE[entry.call.recovery];
+  const state = entry.settled ?? "waiting";
 
-export default function Chat({ models }: { models: ModelProfile[] }) {
-  const [workspace, setWorkspace] = useState<string | null>(null);
+  return (
+    <div className={`toolrow toolrow-${state}`}>
+      <button className="toolrow-head" onClick={() => setOpen((v) => !v)}>
+        <span className={open ? "chev chev-open" : "chev"}>›</span>
+        <span className="toolrow-summary">{summarize(entry.call, entry.output)}</span>
+        {note && <span className="toolrow-flag" title={note}>rescued</span>}
+        {state === "waiting" && <span className="toolrow-wait">waiting</span>}
+        {state === "denied" && <span className="toolrow-denied">refused</span>}
+        {state === "user_rejected" && <span className="toolrow-denied">rejected</span>}
+      </button>
+
+      {open && (
+        <div className="toolrow-body">
+          <div className="toolrow-label">arguments</div>
+          <pre className="code-block">{JSON.stringify(entry.call.arguments, null, 2)}</pre>
+          {note && <div className="toolrow-note">{note}</div>}
+          {entry.output && (
+            <>
+              <div className="toolrow-label">result</div>
+              <pre className="code-block">{entry.output.slice(0, 4000)}</pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Chat({
+  session,
+  models,
+  running,
+  pending,
+  onSend,
+  onAnswer,
+  onWorkspace,
+  onCancel,
+}: {
+  session: Session;
+  models: ModelProfile[];
+  running: boolean;
+  pending: ProposedCall | null;
+  onSend: (text: string, model?: string) => void;
+  onAnswer: (approved: boolean) => void;
+  onWorkspace: (path: string) => void;
+  onCancel: () => void;
+}) {
+  const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState<PermissionMode>("project_auto");
   const [assisted, setAssisted] = useState(true);
-  const [model, setModel] = useState<string>("");
-  const [prompt, setPrompt] = useState("");
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [pending, setPending] = useState<ProposedCall | null>(null);
-  const [running, setRunning] = useState(false);
-  const [rate, setRate] = useState<number | null>(null);
-
+  const [model, setModel] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries, pending]);
+  }, [session.entries.length, pending]);
 
-  useEffect(() => {
-    let off: (() => void) | undefined;
-
-    subscribe(
-      (event: AgentEvent) => {
-        setEntries((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-
-          switch (event.kind) {
-            case "token":
-              // Append to the open assistant turn rather than starting a new one.
-              if (last?.kind === "assistant") {
-                next[next.length - 1] = { ...last, text: last.text + event.text };
-              } else {
-                next.push({ kind: "assistant", text: event.text });
-              }
-              break;
-            case "tool_proposed":
-              next.push({ kind: "tool", call: event.call });
-              break;
-            case "tool_settled":
-              for (let i = next.length - 1; i >= 0; i--) {
-                const entry = next[i];
-                if (entry.kind === "tool" && entry.call.id === event.id) {
-                  next[i] = { ...entry, output: event.output, settled: event.outcome };
-                  break;
-                }
-              }
-              break;
-            case "error":
-              next.push({ kind: "notice", text: event.message, tone: "error" });
-              break;
-            case "done":
-              next.push({ kind: "notice", text: `Finished: ${event.reason}`, tone: "info" });
-              break;
-          }
-          return next;
-        });
-
-        if (event.kind === "step_done") setRate(event.metrics.decode_tps);
-      },
-      (call) => setPending(call),
-    ).then((fn) => {
-      off = fn;
-    });
-
-    return () => off?.();
-  }, []);
+  const usable = useMemo(() => models.filter((m) => m.capabilities.tools), [models]);
 
   async function pickFolder() {
     const chosen = await open({ directory: true, multiple: false });
-    if (typeof chosen !== "string") return;
-    try {
-      setWorkspace(await api.setWorkspace(chosen));
-    } catch (e) {
-      setEntries((p) => [...p, { kind: "notice", text: String(e), tone: "error" }]);
-    }
+    if (typeof chosen === "string") onWorkspace(chosen);
   }
 
   async function changeMode(next: PermissionMode) {
-    // Unrestricted is the one mode that can damage things outside the project,
-    // so entering it takes a deliberate confirmation.
+    // The one mode that can damage things outside the project takes a
+    // deliberate confirmation, not a single click in a dropdown.
     if (next === "unrestricted") {
       const ok = window.confirm(
         "Unrestricted mode runs commands and writes files without asking, " +
@@ -124,114 +102,107 @@ export default function Chat({ models }: { models: ModelProfile[] }) {
     await api.setMode(next);
   }
 
-  async function send() {
+  function send() {
     if (!prompt.trim() || running) return;
-    if (!workspace) {
-      setEntries((p) => [
-        ...p,
-        { kind: "notice", text: "Choose a project folder first.", tone: "error" },
-      ]);
-      return;
-    }
-    const text = prompt;
+    onSend(prompt, model || undefined);
     setPrompt("");
-    setEntries((p) => [...p, { kind: "user", text }]);
-    setRunning(true);
-    try {
-      await api.run(text, model || undefined);
-    } catch (e) {
-      setEntries((p) => [...p, { kind: "notice", text: String(e), tone: "error" }]);
-    } finally {
-      setRunning(false);
-      setPending(null);
-    }
   }
 
-  async function answer(approved: boolean) {
-    if (!pending) return;
-    await api.resolveApproval(pending.id, approved);
-    setPending(null);
-  }
-
-  const usable = models.filter((m) => m.capabilities.tools);
+  const folderName = session.workspace?.split(/[\\/]/).filter(Boolean).pop();
 
   return (
     <div className="chat">
-      <div className="chat-bar">
-        <button className="btn" onClick={pickFolder}>
-          {workspace ? "Change folder" : "Choose folder"}
+      <header className="chat-head">
+        <div className="chat-title" title={session.title}>
+          {session.title}
+        </div>
+        <button className="chip chip-folder" onClick={pickFolder} title={session.workspace ?? "No folder selected"}>
+          {folderName ?? "choose folder"}
         </button>
-        <span className="chat-path" title={workspace ?? ""}>
-          {workspace ?? "no folder selected"}
-        </span>
-
-        <select
-          className="select"
-          value={mode}
-          onChange={(e) => changeMode(e.target.value as PermissionMode)}
-          title={MODE_LABELS[mode].hint}
+        <button
+          className={settingsOpen ? "icon-btn icon-btn-on" : "icon-btn"}
+          onClick={() => setSettingsOpen((v) => !v)}
+          title="Session settings"
         >
-          {Object.entries(MODE_LABELS).map(([value, { name }]) => (
-            <option key={value} value={value}>
-              {name}
-            </option>
-          ))}
-        </select>
+          ⋮
+        </button>
+      </header>
 
-        <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
-          <option value="">Auto (routed)</option>
-          {usable.map((m) => (
-            <option key={m.name} value={m.name}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-
-        <label className="toggle" title="A small model settles routine confirmations. It can never approve destructive actions.">
-          <input
-            type="checkbox"
-            checked={assisted}
-            onChange={async (e) => {
-              setAssisted(e.target.checked);
-              await api.setAssisted(e.target.checked);
-            }}
-          />
-          Assisted approval
-        </label>
-
-        {rate !== null && <span className="rate">{rate.toFixed(1)} tok/s</span>}
-      </div>
+      {settingsOpen && (
+        <div className="settings-strip">
+          <label className="field">
+            <span>Permissions</span>
+            <select
+              className="select"
+              value={mode}
+              onChange={(e) => changeMode(e.target.value as PermissionMode)}
+            >
+              {Object.entries(MODE_LABELS).map(([value, { name }]) => (
+                <option key={value} value={value}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
+              <option value="">Auto (routed)</option>
+              {usable.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name} · {m.placement}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field field-inline" title="A small model settles routine confirmations. It can never approve a destructive action.">
+            <input
+              type="checkbox"
+              checked={assisted}
+              onChange={async (e) => {
+                setAssisted(e.target.checked);
+                await api.setAssisted(e.target.checked);
+              }}
+            />
+            <span>Assisted approval</span>
+          </label>
+          <p className="settings-hint">{MODE_LABELS[mode].hint}</p>
+        </div>
+      )}
 
       {mode === "unrestricted" && (
         <div className="danger-banner">
-          Unrestricted mode is on. The agent runs commands and writes files without asking.
+          Unrestricted mode — the agent runs commands and writes files without asking.
         </div>
       )}
 
       <div className="transcript">
-        {entries.length === 0 && (
+        {session.entries.length === 0 && (
           <div className="empty">
-            <p>Pick a folder, then describe what you want done.</p>
-            <p className="muted">
-              Routing picks a model that fits in VRAM unless you choose one.
+            <div className="empty-mark">▮</div>
+            <h2>What should the agent do?</h2>
+            <p>
+              {session.workspace
+                ? "Describe a task. Routing picks a model that fits in VRAM."
+                : "Choose a project folder to begin."}
             </p>
           </div>
         )}
 
-        {entries.map((entry, i) => {
+        {session.entries.map((entry, i) => {
           if (entry.kind === "user") {
             return (
-              <div key={i} className="msg msg-user">
+              <div key={i} className="turn turn-user">
                 {entry.text}
               </div>
             );
           }
           if (entry.kind === "assistant") {
-            return (
-              <div key={i} className="msg msg-assistant">
+            return entry.text.trim() ? (
+              <div key={i} className="turn turn-assistant">
                 {entry.text}
               </div>
-            );
+            ) : null;
           }
           if (entry.kind === "notice") {
             return (
@@ -240,23 +211,14 @@ export default function Chat({ models }: { models: ModelProfile[] }) {
               </div>
             );
           }
-          const note = RECOVERY_NOTE[entry.call.recovery];
-          return (
-            <div key={i} className={`toolcard tool-${entry.settled ?? "waiting"}`}>
-              <div className="toolcard-head">
-                <code>{entry.call.name}</code>
-                {entry.settled && <span className="tool-outcome">{entry.settled.replace("_", " ")}</span>}
-              </div>
-              <pre className="toolcard-args">
-                {JSON.stringify(entry.call.arguments, null, 2)}
-              </pre>
-              {note && <div className="recovery">{note}</div>}
-              {entry.output && (
-                <pre className="toolcard-output">{entry.output.slice(0, 1500)}</pre>
-              )}
-            </div>
-          );
+          return <ToolRow key={i} entry={entry} />;
         })}
+
+        {running && !pending && (
+          <div className="working">
+            <span className="pulse" /> working…
+          </div>
+        )}
         <div ref={bottom} />
       </div>
 
@@ -267,26 +229,44 @@ export default function Chat({ models }: { models: ModelProfile[] }) {
               Approve <code>{pending.name}</code>?
             </div>
             <div className="approval-reason">{pending.evaluation.reason}</div>
-            <pre className="approval-args">
-              {JSON.stringify(pending.arguments, null, 2)}
-            </pre>
+            <pre className="code-block">{JSON.stringify(pending.arguments, null, 2)}</pre>
           </div>
           <div className="approval-actions">
-            <button className="btn btn-ghost" onClick={() => answer(false)}>
+            <button className="btn" onClick={() => onAnswer(false)}>
               Reject
             </button>
-            <button className="btn btn-primary" onClick={() => answer(true)}>
+            <button className="btn btn-primary" onClick={() => onAnswer(true)}>
               Approve
             </button>
           </div>
         </div>
       )}
 
+      <div className="statusline">
+        <span className="status-mark">✳</span>
+        <span>{formatElapsed(session.elapsedMs)}</span>
+        <span className="sep">·</span>
+        <span>{formatTokens(session.tokens)} tokens</span>
+        {session.lastRate !== null && (
+          <>
+            <span className="sep">·</span>
+            <span className="status-rate">{session.lastRate.toFixed(1)} tok/s</span>
+          </>
+        )}
+        <span className="sep">·</span>
+        <span className="status-mode">{MODE_LABELS[mode].name}</span>
+        {running && (
+          <button className="status-cancel" onClick={onCancel}>
+            Stop
+          </button>
+        )}
+      </div>
+
       <div className="composer">
         <textarea
           className="input"
-          rows={3}
-          placeholder="What should the agent do?"
+          rows={2}
+          placeholder={session.workspace ? "Describe a task…" : "Choose a folder first"}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
@@ -295,10 +275,15 @@ export default function Chat({ models }: { models: ModelProfile[] }) {
               send();
             }
           }}
-          disabled={running}
+          disabled={running || !session.workspace}
         />
-        <button className="btn btn-primary" onClick={send} disabled={running || !prompt.trim()}>
-          {running ? "Running…" : "Send"}
+        <button
+          className="send"
+          onClick={send}
+          disabled={running || !prompt.trim() || !session.workspace}
+          title="Send (Enter)"
+        >
+          ↵
         </button>
       </div>
     </div>
