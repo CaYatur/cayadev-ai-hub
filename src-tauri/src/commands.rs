@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::agent::runner::{AgentEvent, AgentRunner, RunConfig, StopReason};
+use crate::agent::runner::{AgentEvent, AgentRunner, RunConfig, StopReason, Turn};
 use crate::ollama::TaskClass;
 use crate::perms::{Outcome, PermissionEngine, PermissionMode};
 use crate::session::{self, PendingApprovals};
@@ -197,6 +197,7 @@ pub async fn run_agent(
     model: Option<String>,
     num_ctx: Option<u32>,
     effort: Option<Effort>,
+    history: Option<Vec<Turn>>,
 ) -> Result<String, String> {
     let workspace = state
         .workspace
@@ -261,6 +262,10 @@ pub async fn run_agent(
             params_billions: params,
             think,
             max_steps: effort.max_steps(),
+            // What was already said in this conversation. The frontend owns the
+            // transcript, so it decides what is worth replaying — the engine
+            // holding its own copy is what leaked attachments between sessions.
+            history: history.unwrap_or_default(),
             ..Default::default()
         },
     )

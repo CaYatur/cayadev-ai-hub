@@ -99,6 +99,29 @@ pub enum StopReason {
     Cancelled,
 }
 
+/// One earlier exchange, replayed so the model can refer back to it.
+///
+/// Only the text: reasoning is left out because replaying chain-of-thought
+/// burns window and confuses the templates that emit it, and tool output is
+/// folded into the assistant's text by the caller as one summary line per call.
+/// What the model needs from three questions ago is what was said and what was
+/// done, not the four thousand characters a `read_file` returned.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Turn {
+    pub role: String,
+    pub text: String,
+}
+
+impl Turn {
+    fn to_message(&self) -> Message {
+        if self.role == "assistant" {
+            Message::assistant(&self.text)
+        } else {
+            Message::user(&self.text)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub model: String,
@@ -110,6 +133,11 @@ pub struct RunConfig {
     pub loop_threshold: usize,
     /// Parameter count in billions, used to size the system prompt.
     pub params_billions: Option<f64>,
+    /// Earlier exchanges in this conversation, oldest first.
+    ///
+    /// Sent between the system prompt and the instruction, so the system
+    /// prefix stays byte-stable and the daemon keeps reusing its KV cache.
+    pub history: Vec<Turn>,
 }
 
 impl Default for RunConfig {
@@ -124,6 +152,7 @@ impl Default for RunConfig {
             keep_alive: "15m".into(),
             loop_threshold: 3,
             params_billions: None,
+            history: Vec::new(),
         }
     }
 }
@@ -182,10 +211,12 @@ impl AgentRunner {
         tools.set_progress(progress_tx);
 
         let workspace = self.perms.workspace().display().to_string();
-        let mut messages = vec![
-            Message::system(system_prompt(tier, &workspace, &schemas)),
-            Message::user(user_message),
-        ];
+        let mut messages = vec![Message::system(system_prompt(tier, &workspace, &schemas))];
+        messages.extend(self.config.history.iter().map(Turn::to_message));
+        messages.push(Message::user(user_message));
+        // Which message holds the instruction. Trimming removes from in front
+        // of it, so the index moves and has to be carried rather than assumed.
+        let mut task = messages.len() - 1;
 
         let mut signature_counts: HashMap<String, usize> = HashMap::new();
         // One retry per run: a second stall is a real failure, not a full window.
@@ -201,9 +232,10 @@ impl AgentRunner {
             // from the front, which is where the system prompt and the task
             // are — and then its template reports "no user query found".
             if let Some(num_ctx) = self.config.num_ctx {
-                let dropped = context::fit(&mut messages, num_ctx);
-                if dropped > 0 {
-                    tracing::info!("dropped {dropped} messages to fit {num_ctx} tokens");
+                let trim = context::fit(&mut messages, num_ctx, task);
+                task = trim.task;
+                if trim.dropped > 0 {
+                    tracing::info!("dropped {} messages to fit {num_ctx} tokens", trim.dropped);
                 }
             }
 
@@ -253,7 +285,7 @@ impl AgentRunner {
                 Err(crate::ollama::OllamaError::Stalled { .. }) if !stalled_once => {
                     stalled_once = true;
                     if let Some(num_ctx) = self.config.num_ctx {
-                        context::fit(&mut messages, num_ctx / 2);
+                        task = context::fit(&mut messages, num_ctx / 2, task).task;
                     }
                     let _ = events
                         .send(AgentEvent::Error {

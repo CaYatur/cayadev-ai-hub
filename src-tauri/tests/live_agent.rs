@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use cayadev_ai_hub_lib::agent::approver::{AssistedGate, ModelOracle};
 use cayadev_ai_hub_lib::agent::runner::ToolExecutor;
 use cayadev_ai_hub_lib::agent::runner::{
-    AgentEvent, AgentRunner, ApprovalGate, ProposedCall, RunConfig, StopReason,
+    AgentEvent, AgentRunner, ApprovalGate, ProposedCall, RunConfig, StopReason, Turn,
 };
 use cayadev_ai_hub_lib::ollama::{OllamaClient, Timeouts, DEFAULT_HOST};
 use cayadev_ai_hub_lib::perms::{Outcome, PermissionEngine, PermissionMode};
@@ -77,6 +77,22 @@ async fn run_agent(
     gate: &dyn ApprovalGate,
     params_billions: Option<f64>,
 ) -> (StopReason, Transcript) {
+    run_agent_with_history(model, workspace, prompt, gate, params_billions, Vec::new()).await
+}
+
+fn turn(role: &str, text: &str) -> Turn {
+    Turn { role: role.into(), text: text.into() }
+}
+
+/// Drive one run that carries earlier exchanges.
+async fn run_agent_with_history(
+    model: &str,
+    workspace: &PathBuf,
+    prompt: &str,
+    gate: &dyn ApprovalGate,
+    params_billions: Option<f64>,
+    history: Vec<Turn>,
+) -> (StopReason, Transcript) {
     let mut tools = WorkspaceTools::new(workspace);
     let perms = PermissionEngine::new(workspace, PermissionMode::ProjectAuto);
     let runner = AgentRunner::new(
@@ -87,6 +103,7 @@ async fn run_agent(
             max_steps: 8,
             num_ctx: Some(8192),
             params_billions,
+            history,
             ..Default::default()
         },
     );
@@ -520,5 +537,68 @@ async fn a_greeting_does_not_trigger_a_tool() {
         assert!(!reply.trim().is_empty(), "{greeting:?} produced no reply at all");
     }
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn a_second_turn_remembers_the_first() {
+    // The complaint this exists for: "model aynı sohbetteki önceki yazdığımı
+    // veya yaptığı işi hatırlamıyor". Each run used to start from an empty
+    // conversation, so the second question could not see the first answer.
+    let dir = scratch("memory");
+
+    let (reason, t) = run_agent_with_history(
+        CODER,
+        &dir,
+        "What number did I ask you to remember?",
+        &AutoApprove,
+        Some(7.0),
+        vec![
+            turn("user", "Remember the number 4271. Just acknowledge it."),
+            turn("assistant", "Noted — 4271."),
+        ],
+    )
+    .await;
+
+    report("coder/memory", &reason, &t);
+    assert!(
+        t.text.contains("4271"),
+        "the earlier turn did not reach the model: {}",
+        t.text
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn a_second_turn_knows_what_was_already_done() {
+    // Work done, not just words said. The transcript replays tool calls as one
+    // summary line each, so the model knows the file exists without the run
+    // that made it being replayed in full.
+    let dir = scratch("memory-work");
+    std::fs::write(dir.join("notes.txt"), "10
+").unwrap();
+
+    let (reason, t) = run_agent_with_history(
+        CODER,
+        &dir,
+        "Which file did you create? Answer with the filename only. Do not call a tool.",
+        &AutoApprove,
+        Some(7.0),
+        vec![
+            turn("user", "Write 10 into a file."),
+            turn("assistant", "[Wrote notes.txt · +1]
+Created `notes.txt`."),
+        ],
+    )
+    .await;
+
+    report("coder/memory-work", &reason, &t);
+    assert!(
+        t.text.contains("notes.txt"),
+        "the earlier tool call did not reach the model: {}",
+        t.text
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

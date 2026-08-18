@@ -10,12 +10,18 @@
 //!   `500 {"error":"no user query found in messages"}`.
 //! * Or it survives but the model has lost the task and starts improvising.
 //!
-//! So the trimming happens here instead, and it drops from the middle. The
-//! system prompt and the first user message are never removed — they are the
-//! task — and the most recent exchanges are kept because they are what the next
-//! step reasons from. What goes is the long stretch of old tool output nobody
-//! needs any more, replaced by a note saying how much was dropped so the model
-//! knows its history is incomplete rather than silently misremembering.
+//! So the trimming happens here instead, and it drops from the middle. Three
+//! things are never removed: the system prompt, the current instruction, and
+//! the most recent exchanges — the first two state the task, the last is what
+//! the next step reasons from. What goes is the long stretch of earlier
+//! conversation and old tool output nobody needs any more, replaced by a note
+//! saying how much was dropped so the model knows its history is incomplete
+//! rather than silently misremembering.
+//!
+//! The current instruction is pinned by index rather than by "the first user
+//! message", because a conversation carries earlier turns before it. Pinning
+//! the first user message would protect something the user wrote an hour ago
+//! and drop what they just asked for.
 
 use crate::agent::prompt::estimate_tokens;
 use crate::ollama::types::Message;
@@ -55,30 +61,49 @@ pub fn total_tokens(messages: &[Message]) -> usize {
     messages.iter().map(cost).sum()
 }
 
+/// What a trim did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trim {
+    /// Messages removed.
+    pub dropped: usize,
+    /// Where the current instruction ended up. Indices before it shift when
+    /// messages are removed, so the caller has to be told.
+    pub task: usize,
+}
+
 /// Trim a conversation to fit, dropping from the middle.
 ///
-/// Returns the number of messages removed, and mutates `messages` in place.
-pub fn fit(messages: &mut Vec<Message>, num_ctx: u32) -> usize {
+/// `task` is the index of the message holding the current instruction. It
+/// survives regardless of how old it gets — without that, a long run drops the
+/// thing it is trying to do and the model starts improvising.
+pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize) -> Trim {
     let budget = (num_ctx as f64 * OCCUPANCY) as usize;
+    let mut task = task.min(messages.len().saturating_sub(1));
     if total_tokens(messages) <= budget {
-        return 0;
+        return Trim { dropped: 0, task };
     }
 
-    // The head is what states the task: the system prompt and the first user
-    // turn. Everything downstream is meaningless without them.
-    let head = messages
-        .iter()
-        .position(|m| m.role == "user")
-        .map(|i| i + 1)
-        .unwrap_or(1)
-        .min(messages.len());
+    // The system prompt states how to behave; everything after it is
+    // conversation and can go, except the instruction and the recent tail.
+    let head = usize::from(messages.first().is_some_and(|m| m.role == "system"));
 
     let mut dropped = 0usize;
-    // Never cut into the head or the recent tail, however tight the budget —
-    // a conversation that cannot fit is better sent slightly oversized than
-    // sent without its instruction.
-    while total_tokens(messages) > budget && messages.len() > head + KEEP_RECENT {
-        messages.remove(head);
+    let mut cut = head;
+    while total_tokens(messages) > budget {
+        let floor = messages.len().saturating_sub(KEEP_RECENT);
+        if cut >= floor {
+            // Nothing left that may be dropped. Better slightly oversized than
+            // missing the instruction.
+            break;
+        }
+        if cut == task {
+            cut += 1;
+            continue;
+        }
+        messages.remove(cut);
+        if task > cut {
+            task -= 1;
+        }
         dropped += 1;
     }
 
@@ -88,19 +113,21 @@ pub fn fit(messages: &mut Vec<Message>, num_ctx: u32) -> usize {
         messages.insert(
             head,
             Message::user(format!(
-                "[{dropped} earlier steps were dropped to stay within the context \
-                 window. Re-read any file you need rather than relying on memory \
-                 of it.]"
+                "[{dropped} earlier steps were dropped to stay within the context                  window. Re-read any file you need rather than relying on memory                  of it.]"
             )),
         );
+        if task >= head {
+            task += 1;
+        }
     }
-    dropped
+    Trim { dropped, task }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A run with no prior conversation: system, task, then steps.
     fn convo(steps: usize, filler: usize) -> Vec<Message> {
         let mut messages = vec![
             Message::system("You are a coding assistant."),
@@ -113,11 +140,28 @@ mod tests {
         messages
     }
 
+    /// A run that carries prior turns: system, history, then the task.
+    /// Returns the conversation and the index of the current instruction.
+    fn with_history(turns: usize, filler: usize, steps: usize) -> (Vec<Message>, usize) {
+        let mut messages = vec![Message::system("You are a coding assistant.")];
+        for i in 0..turns {
+            messages.push(Message::user(format!("older question {i} {}", "y".repeat(filler))));
+            messages.push(Message::assistant(format!("older answer {i} {}", "y".repeat(filler))));
+        }
+        messages.push(Message::user("Refactor the parser."));
+        let task = messages.len() - 1;
+        for i in 0..steps {
+            messages.push(Message::assistant(format!("step {i}")));
+            messages.push(Message::tool_result("read_file", "x".repeat(filler)));
+        }
+        (messages, task)
+    }
+
     #[test]
     fn a_short_conversation_is_untouched() {
         let mut messages = convo(2, 100);
         let before = messages.len();
-        assert_eq!(fit(&mut messages, 8192), 0);
+        assert_eq!(fit(&mut messages, 8192, 1).dropped, 0);
         assert_eq!(messages.len(), before);
     }
 
@@ -125,9 +169,9 @@ mod tests {
     fn a_long_conversation_is_trimmed_to_fit() {
         let mut messages = convo(40, 2_000);
         assert!(total_tokens(&messages) > 8192);
-        let dropped = fit(&mut messages, 8192);
+        let trim = fit(&mut messages, 8192, 1);
 
-        assert!(dropped > 0, "nothing was dropped");
+        assert!(trim.dropped > 0, "nothing was dropped");
         assert!(
             total_tokens(&messages) <= (8192.0 * OCCUPANCY) as usize + 200,
             "still over budget: {}",
@@ -140,12 +184,47 @@ mod tests {
         // The failure this exists to prevent: Ollama truncating from the front,
         // leaving no user turn, and answering 500.
         let mut messages = convo(60, 3_000);
-        fit(&mut messages, 4096);
+        let trim = fit(&mut messages, 4096, 1);
 
         assert_eq!(messages[0].role, "system", "system prompt was dropped");
+        assert!(messages[trim.task].content.contains("Refactor"));
+    }
+
+    #[test]
+    fn the_current_instruction_outlives_the_conversation_it_arrived_in() {
+        // The discriminating case. With prior turns in front of it the task is
+        // no longer the first user message, so protecting "the first user
+        // message" would protect an hour-old question and drop what was just
+        // asked. Fifty turns of history plus a long run, into a small window.
+        let (mut messages, task) = with_history(50, 1_500, 20);
+        assert!(total_tokens(&messages) > 8192);
+
+        let trim = fit(&mut messages, 8192, task);
+
+        assert!(trim.dropped > 0);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(
+            messages[trim.task].content, "Refactor the parser.",
+            "the reported task index does not point at the instruction"
+        );
         assert!(
-            messages.iter().any(|m| m.role == "user" && m.content.contains("Refactor")),
-            "the original instruction was dropped"
+            messages.iter().any(|m| m.content == "Refactor the parser."),
+            "the current instruction was dropped"
+        );
+    }
+
+    #[test]
+    fn old_turns_go_before_recent_ones() {
+        let (mut messages, task) = with_history(30, 1_500, 4);
+        let trim = fit(&mut messages, 8192, task);
+        assert!(trim.dropped > 0);
+        assert!(
+            !messages.iter().any(|m| m.content.starts_with("older question 0")),
+            "the oldest turn survived while newer ones were dropped"
+        );
+        assert!(
+            messages.iter().any(|m| m.content.starts_with("step 3")),
+            "the newest step was dropped"
         );
     }
 
@@ -153,7 +232,7 @@ mod tests {
     fn the_most_recent_steps_survive() {
         let mut messages = convo(40, 2_000);
         let last = messages.last().cloned().unwrap();
-        fit(&mut messages, 8192);
+        fit(&mut messages, 8192, 1);
 
         assert_eq!(
             messages.last().unwrap().content,
@@ -166,7 +245,7 @@ mod tests {
     #[test]
     fn the_model_is_told_that_history_was_dropped() {
         let mut messages = convo(40, 2_000);
-        fit(&mut messages, 8192);
+        fit(&mut messages, 8192, 1);
         assert!(
             messages.iter().any(|m| m.content.contains("were dropped")),
             "trimming happened silently"
@@ -177,18 +256,28 @@ mod tests {
     fn an_impossibly_small_window_still_keeps_the_instruction() {
         // Better to send something slightly oversized than something the model
         // cannot act on at all.
-        let mut messages = convo(30, 5_000);
-        fit(&mut messages, 512);
+        let (mut messages, task) = with_history(20, 4_000, 10);
+        let trim = fit(&mut messages, 512, task);
         assert_eq!(messages[0].role, "system");
-        assert!(messages.iter().any(|m| m.content.contains("Refactor")));
+        assert_eq!(messages[trim.task].content, "Refactor the parser.");
     }
 
     #[test]
     fn trimming_is_idempotent() {
         let mut messages = convo(40, 2_000);
-        fit(&mut messages, 8192);
+        let first = fit(&mut messages, 8192, 1);
         let after_first = messages.len();
-        assert_eq!(fit(&mut messages, 8192), 0);
+        let second = fit(&mut messages, 8192, first.task);
+        assert_eq!(second.dropped, 0);
         assert_eq!(messages.len(), after_first);
+    }
+
+    #[test]
+    fn a_task_index_past_the_end_does_not_panic() {
+        // Defensive: the caller tracks the index across appends and removals,
+        // and a wrong one must degrade rather than crash a run.
+        let mut messages = convo(40, 2_000);
+        let trim = fit(&mut messages, 8192, 9_999);
+        assert!(trim.task < messages.len());
     }
 }

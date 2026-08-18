@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { Turn } from "./sessions";
 
 export type Placement = "resident" | "marginal" | "spilled" | "cloud" | "unknown";
 
@@ -106,8 +107,13 @@ export const api = {
   resolveApproval: (id: string, approved: boolean) =>
     invoke<boolean>("resolve_approval", { id, approved }),
   cancel: () => invoke<void>("cancel_run"),
-  run: (prompt: string, model?: string, numCtx?: number, effort?: Effort) =>
-    invoke<string>("run_agent", { prompt, model, numCtx, effort }),
+  run: (
+    prompt: string,
+    model?: string,
+    numCtx?: number,
+    effort?: Effort,
+    history?: Turn[],
+  ) => invoke<string>("run_agent", { prompt, model, numCtx, effort, history }),
   contextOptions: (model: string) => invoke<ContextOptions>("context_options", { model }),
   checkpointList: () => invoke<Checkpoint[]>("checkpoint_list"),
   checkpointRestore: (id: string) => invoke<string[]>("checkpoint_restore", { id }),

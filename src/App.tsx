@@ -17,12 +17,14 @@ import {
 } from "./lib/agent";
 import {
   applyMetrics,
+  historyFrom,
   load,
   newSession,
   save,
   titleFrom,
   type Entry,
   type Session,
+  type Turn,
 } from "./lib/sessions";
 import "./styles/app.css";
 
@@ -298,7 +300,7 @@ export default function App() {
   }, []);
 
   const run = useCallback(
-    async (id: string, text: string) => {
+    async (id: string, text: string, history: Turn[]) => {
       if (!active) return;
       // Sessions each remember a folder but the engine holds one; re-assert it
       // so a run always uses the folder the header is showing.
@@ -314,7 +316,7 @@ export default function App() {
       setRunStartedAt(Date.now());
       setLiveTokens(0);
       try {
-        await api.run(text, model || undefined, numCtx ?? undefined, effort);
+        await api.run(text, model || undefined, numCtx ?? undefined, effort, history);
       } catch (e) {
         append(id, { kind: "notice", text: String(e), tone: "error" });
       } finally {
@@ -345,7 +347,8 @@ export default function App() {
         title: s.entries.length === 0 ? titleFrom(text) : s.title,
         entries: [...s.entries, { kind: "user", text, at: Date.now() }],
       }));
-      await run(id, withFiles);
+      // Built before the new turn is appended, so it is what came before.
+      await run(id, withFiles, historyFrom(active.entries));
     },
     [active, patch, run, attachments],
   );
@@ -359,7 +362,7 @@ export default function App() {
       if (entry?.kind !== "user") return;
 
       patch(id, (s) => ({ ...s, entries: s.entries.slice(0, index + 1) }));
-      await run(id, entry.text);
+      await run(id, entry.text, historyFrom(active.entries.slice(0, index)));
     },
     [active, running, patch, run],
   );

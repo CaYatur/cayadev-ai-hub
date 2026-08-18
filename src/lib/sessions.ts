@@ -160,6 +160,85 @@ export const RECOVERY_NOTE: Partial<Record<Recovery, string>> = {
   python_call: "rescued from Python-style syntax",
 };
 
+/// One earlier exchange as the engine wants it.
+export type Turn = { role: "user" | "assistant"; text: string };
+
+/// Turns replayed at most. Beyond this the oldest are dropped here rather than
+/// shipped and then trimmed again by the engine.
+const MAX_HISTORY_TURNS = 16;
+/// Characters of history replayed at most, counted from the newest backwards.
+const MAX_HISTORY_CHARS = 8000;
+/// A single turn longer than this is shortened from the middle — the start says
+/// what it was about and the end says how it finished.
+const MAX_TURN_CHARS = 1500;
+
+function clamp(text: string): string {
+  if (text.length <= MAX_TURN_CHARS) return text;
+  const half = Math.floor(MAX_TURN_CHARS / 2);
+  return `${text.slice(0, half)}
+…
+${text.slice(-half)}`;
+}
+
+/// Flatten a transcript into the exchanges worth replaying to the model.
+///
+/// Not a copy of the transcript. Reasoning is left out — replaying
+/// chain-of-thought burns window and confuses the templates that emit it. Tool
+/// output is left out too, but the *fact* of each call is folded into the
+/// assistant's turn as one summary line, because "önceki yaptığı işi
+/// hatırlamıyor" is about the work, not just the words: the model has to know
+/// it already wrote `test.txt` without carrying the four thousand characters a
+/// `read_file` returned.
+export function historyFrom(entries: Entry[]): Turn[] {
+  const turns: Turn[] = [];
+
+  const intoAssistant = (text: string) => {
+    const last = turns[turns.length - 1];
+    if (last?.role === "assistant") last.text = `${last.text}
+${text}`.trim();
+    else turns.push({ role: "assistant", text });
+  };
+
+  for (const entry of entries) {
+    switch (entry.kind) {
+      case "user":
+        turns.push({ role: "user", text: entry.text });
+        break;
+      case "assistant":
+        if (entry.text.trim()) intoAssistant(entry.text.trim());
+        break;
+      case "tool":
+        // Rejected and failed calls matter as much as successful ones: without
+        // them the model retries what the user already refused.
+        if (entry.settled === "user_rejected") {
+          intoAssistant(`[tried ${summarize(entry.call, entry.output)} — you declined]`);
+        } else if (entry.settled === "failed") {
+          intoAssistant(`[tried ${summarize(entry.call, entry.output)} — it failed]`);
+        } else {
+          intoAssistant(`[${summarize(entry.call, entry.output)}]`);
+        }
+        break;
+      default:
+        // Reasoning and app notices are ours, not the conversation's.
+        break;
+    }
+  }
+
+  const kept: Turn[] = [];
+  let budget = MAX_HISTORY_CHARS;
+  for (let i = turns.length - 1; i >= 0 && kept.length < MAX_HISTORY_TURNS; i--) {
+    const text = clamp(turns[i].text);
+    if (!text) continue;
+    if (budget - text.length < 0 && kept.length > 0) break;
+    budget -= text.length;
+    kept.unshift({ role: turns[i].role, text });
+  }
+  // Starting on the assistant's half of an exchange reads as the model talking
+  // to itself; drop it so history begins with something the user said.
+  while (kept.length > 0 && kept[0].role === "assistant") kept.shift();
+  return kept;
+}
+
 export function applyMetrics(session: Session, metrics: Metrics): Session {
   return {
     ...session,
