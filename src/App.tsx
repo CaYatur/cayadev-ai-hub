@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import Activity from "./components/Activity";
 import Chat from "./components/Chat";
 import Models from "./components/Models";
 import Sidebar from "./components/Sidebar";
 import {
   api,
+  onFileDrop,
   subscribe,
+  type Attachment,
   type AgentEvent,
   type Effort,
   type ModelProfile,
@@ -23,7 +26,7 @@ import {
 } from "./lib/sessions";
 import "./styles/app.css";
 
-type View = "chat" | "models";
+type View = "chat" | "models" | "activity";
 
 export default function App() {
   const { t } = useTranslation();
@@ -48,6 +51,8 @@ export default function App() {
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState<Effort>("balanced");
   const [numCtx, setNumCtx] = useState<number | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [dropping, setDropping] = useState(false);
 
   // The event stream is global, so handlers need the current session id without
   // resubscribing on every switch.
@@ -116,6 +121,19 @@ export default function App() {
             });
             break;
 
+          case "thinking":
+            patch(id, (s) => {
+              const entries = [...s.entries];
+              const last = entries[entries.length - 1];
+              if (last?.kind === "thinking") {
+                entries[entries.length - 1] = { ...last, text: last.text + event.text };
+              } else {
+                entries.push({ kind: "thinking", text: event.text });
+              }
+              return { ...s, entries };
+            });
+            break;
+
           case "tool_proposed":
             append(id, { kind: "tool", call: event.call });
             break;
@@ -168,6 +186,40 @@ export default function App() {
       off?.();
     };
   }, [append, patch, t]);
+
+  const attach = useCallback(
+    async (paths: string[]) => {
+      const id = activeRef.current;
+      try {
+        const added = await api.attachFiles(paths);
+        // De-duplicate: dropping the same file twice should not add it twice.
+        setAttachments((prev) => {
+          const seen = new Set(prev.map((a) => a.path));
+          return [...prev, ...added.filter((a) => !seen.has(a.path))];
+        });
+      } catch (e) {
+        if (id) append(id, { kind: "notice", text: String(e), tone: "error" });
+      }
+    },
+    [append],
+  );
+
+  const detach = useCallback(async (path: string) => {
+    setAttachments((prev) => prev.filter((a) => a.path !== path));
+  }, []);
+
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    onFileDrop(attach, setDropping).then((fn) => {
+      if (cancelled) fn();
+      else off = fn;
+    });
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [attach]);
 
   const setWorkspace = useCallback(
     async (path: string) => {
@@ -222,14 +274,23 @@ export default function App() {
     async (text: string) => {
       if (!active) return;
       const id = active.id;
+      // Tell the model where the attached files are, in the message rather
+      // than the system prompt — the prompt has to stay byte-stable for the
+      // daemon to reuse its KV cache.
+      const withFiles = attachments.length
+        ? `${text}\n\nAttached files:\n${attachments
+            .map((a) => `- ${a.path} (open with ${a.tool})`)
+            .join("\n")}`
+        : text;
+
       patch(id, (s) => ({
         ...s,
         title: s.entries.length === 0 ? titleFrom(text) : s.title,
         entries: [...s.entries, { kind: "user", text, at: Date.now() }],
       }));
-      await run(id, text);
+      await run(id, withFiles);
     },
-    [active, patch, run],
+    [active, patch, run, attachments],
   );
 
   /// Re-run a user turn, discarding everything that followed it.
@@ -332,6 +393,12 @@ export default function App() {
           >
             {t("app.models")}
           </button>
+          <button
+            className={view === "activity" ? "viewtab viewtab-on" : "viewtab"}
+            onClick={() => setView("activity")}
+          >
+            {t("app.activity")}
+          </button>
         </div>
 
         {view === "chat" && active ? (
@@ -355,11 +422,27 @@ export default function App() {
             onModel={setModel}
             onEffort={setEffort}
             onNumCtx={setNumCtx}
+            attachments={attachments}
+            dropping={dropping}
+            onDetach={detach}
             onRetry={retry}
             onRemove={removeFrom}
             onCopy={copy}
             onBranch={branch}
           />
+        ) : view === "activity" && active ? (
+          <main className="content">
+            <Activity
+              session={active}
+              onRestored={(paths) =>
+                append(active.id, {
+                  kind: "notice",
+                  text: t("activity.restored", { files: paths.join(", ") }),
+                  tone: "info",
+                })
+              }
+            />
+          </main>
         ) : (
           <main className="content">
             <Models

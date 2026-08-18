@@ -457,21 +457,22 @@ mod tests {
     }
 
     #[test]
-    fn capturing_a_screen_is_never_silent() {
-        use crate::perms::{Decision, PermissionEngine, PermissionMode};
+    fn capturing_a_screen_is_a_distinct_decision() {
+        // Both screen captures map to `CaptureScreen` rather than an ordinary
+        // file read, so the mode can decide about them as a category. Before
+        // this they evaluated against a fake `<screen>` path and slipped
+        // through as unremarkable reads.
+        use crate::perms::{Action, Decision, PermissionEngine, PermissionMode};
         let t = tools(Some("qwen3-vl:8b"));
-        let engine = PermissionEngine::new(std::env::temp_dir(), PermissionMode::Unrestricted);
+        let cautious = PermissionEngine::new(std::env::temp_dir(), PermissionMode::ProjectAuto);
 
-        for (name, payload) in [
-            ("screenshot", json!({})),
-            ("adb", json!({"action": "screen"})),
-        ] {
+        for (name, payload) in [("screenshot", json!({})), ("adb", json!({"action": "screen"}))] {
             let action = t.action_for(name, &args(payload)).unwrap();
-            assert_eq!(
-                engine.evaluate(&action).decision,
-                Decision::Ask,
-                "{name} must be confirmed before an image of a screen reaches a model"
+            assert!(
+                matches!(action, Action::CaptureScreen { .. }),
+                "{name} should be a capture, not a file read"
             );
+            assert_eq!(cautious.evaluate(&action).decision, Decision::Ask, "{name}");
         }
     }
 

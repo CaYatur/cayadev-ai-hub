@@ -26,8 +26,17 @@ use std::time::Duration;
 use crate::ollama::types::Tool;
 use crate::perms::Action;
 
-const WEB_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_PAGE_CHARS: usize = 40_000;
+const WEB_TIMEOUT: Duration = Duration::from_secs(20);
+/// How much of a page reaches the model.
+///
+/// This was 40,000, which is roughly 11,000 tokens — more than the whole 8k
+/// context the agent runs in, so a single page read either overflowed the
+/// window or spent the entire budget on one article. At 5 tok/s that also
+/// meant minutes of prefill for a page the model needed three paragraphs of.
+///
+/// 6,000 characters is about 1,700 tokens: enough to answer a question about a
+/// page, small enough to leave room to reason about it.
+const MAX_PAGE_CHARS: usize = 6_000;
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 

@@ -10,7 +10,8 @@
     "deleteSession": "Oturumu sil",
     "today": "Bugün",
     "yesterday": "Dün",
-    "earlier": "Daha önce"
+    "earlier": "Daha önce",
+    "activity": "Etkinlik"
   },
   "chat": {
     "chooseFolder": "klasör seç",
@@ -34,7 +35,13 @@
     "refused": "reddedildi",
     "rejected": "iptal",
     "arguments": "parametreler",
-    "result": "sonuç"
+    "result": "sonuç",
+    "thinking": "Akıl yürütme",
+    "thinkingLive": "Düşünüyor…",
+    "placeholderBusy": "Bu çalışırken sıradaki komutu yazabilirsiniz…",
+    "words": "kelime",
+    "detach": "Kaldır",
+    "dropHint": "Eklemek için dosyaları bırakın"
   },
   "approval": {
     "title": "{{tool}} onaylansın mı?",
@@ -54,7 +61,10 @@
     "unrestrictedWarning": "Sınırsız mod, bu klasörün dışı dahil olmak üzere komutları sormadan çalıştırır ve dosyaları sormadan yazar.\n\nDevam edilsin mi?",
     "unrestrictedBanner": "Sınırsız mod — ajan komutları sormadan çalıştırıyor ve dosyaları sormadan yazıyor.",
     "assisted": "Yapay zekâ destekli onay",
-    "assistedHint": "Küçük bir model rutin onayları halleder. Yıkıcı olanları asla."
+    "assistedHint": "Küçük bir model rutin onayları halleder. Yıkıcı olanları asla.",
+    "recommended": "önerilen",
+    "autonomous": "Otonom",
+    "autonomous_hint": "Bu makinede hiçbir şey sormaz. Her şey kaydedilir ve geri alınabilir."
   },
   "effort": {
     "label": "Efor",
@@ -108,5 +118,28 @@
     "vision": "Görseller",
     "summarize": "Özet ve başlıklar"
   },
-  "language": { "label": "Dil" }
+  "language": {
+    "label": "Dil"
+  },
+  "activity": {
+    "title": "Etkinlik",
+    "intro": "Otonom mod, onay sorularını bu sayfayla takas eder: her karar motorun verdiği gerekçeyle listelenir ve her dosya değişikliği geri alınabilir.",
+    "undo": "Geri alma",
+    "storeSize": "geçmiş: {{size}}",
+    "noCheckpoints": "Henüz dosya değişikliği yok.",
+    "noFiles": "(dosya yok)",
+    "restore": "Geri al",
+    "restoring": "Geri alınıyor…",
+    "restored": "Geri alındı: {{files}}",
+    "decisions": "Kararlar",
+    "noDecisions": "Henüz araç çağrısı yok."
+  },
+  "outcome": {
+    "auto_approved": "otomatik",
+    "user_approved": "onaylandı",
+    "user_rejected": "iptal",
+    "denied": "reddedildi",
+    "failed": "başarısız",
+    "waiting": "bekliyor"
+  }
 }

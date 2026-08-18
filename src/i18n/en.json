@@ -10,7 +10,8 @@
     "deleteSession": "Delete session",
     "today": "Today",
     "yesterday": "Yesterday",
-    "earlier": "Earlier"
+    "earlier": "Earlier",
+    "activity": "Activity"
   },
   "chat": {
     "chooseFolder": "choose folder",
@@ -34,7 +35,13 @@
     "refused": "refused",
     "rejected": "rejected",
     "arguments": "arguments",
-    "result": "result"
+    "result": "result",
+    "thinking": "Reasoning",
+    "thinkingLive": "Thinking…",
+    "placeholderBusy": "Write the next instruction while this one runs…",
+    "words": "words",
+    "detach": "Remove",
+    "dropHint": "Drop files to attach them"
   },
   "approval": {
     "title": "Approve {{tool}}?",
@@ -54,7 +61,10 @@
     "unrestrictedWarning": "Unrestricted mode runs commands and writes files without asking, including outside this folder.\n\nContinue?",
     "unrestrictedBanner": "Unrestricted mode — the agent runs commands and writes files without asking.",
     "assisted": "Assisted approval",
-    "assistedHint": "A small model settles routine confirmations. Never destructive ones."
+    "assistedHint": "A small model settles routine confirmations. Never destructive ones.",
+    "recommended": "recommended",
+    "autonomous": "Autonomous",
+    "autonomous_hint": "Nothing on this machine interrupts. Everything is logged and revertible."
   },
   "effort": {
     "label": "Effort",
@@ -108,5 +118,28 @@
     "vision": "Images",
     "summarize": "Summaries & titles"
   },
-  "language": { "label": "Language" }
+  "language": {
+    "label": "Language"
+  },
+  "activity": {
+    "title": "Activity",
+    "intro": "Autonomous mode trades confirmation prompts for this page: every decision is listed with the reason the engine gave, and every file change can be taken back.",
+    "undo": "Undo",
+    "storeSize": "history: {{size}}",
+    "noCheckpoints": "No file changes yet.",
+    "noFiles": "(no files)",
+    "restore": "Revert",
+    "restoring": "Reverting…",
+    "restored": "Reverted: {{files}}",
+    "decisions": "Decisions",
+    "noDecisions": "No tool calls yet."
+  },
+  "outcome": {
+    "auto_approved": "auto",
+    "user_approved": "approved",
+    "user_rejected": "rejected",
+    "denied": "refused",
+    "failed": "failed",
+    "waiting": "waiting"
+  }
 }

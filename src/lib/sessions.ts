@@ -5,6 +5,10 @@ import type { Metrics, Outcome, ProposedCall, Recovery } from "./agent";
 export type Entry =
   | { kind: "user"; text: string; at?: number }
   | { kind: "assistant"; text: string }
+  /// Reasoning from a thinking-capable model. Kept separate from the
+  /// answer so it can be folded away — it is usually much longer than
+  /// the reply and reading it is opt-in.
+  | { kind: "thinking"; text: string }
   | {
       kind: "tool";
       call: ProposedCall;

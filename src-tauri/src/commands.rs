@@ -39,6 +39,17 @@ pub struct AppState {
     /// Whether the classifier may settle escalated calls.
     pub assisted_approval: RwLock<bool>,
     pub pending: PendingApprovals,
+    /// Files dragged or pasted into the chat.
+    ///
+    /// They usually live outside the workspace, which the permission engine
+    /// would otherwise escalate on every read. Registering each file as an
+    /// extra root lets the agent open exactly what the user handed it — not
+    /// the rest of the folder it came from.
+    pub attachments: RwLock<Vec<PathBuf>>,
+    /// Set by `cancel_run`; the in-flight runner and its HTTP stream both
+    /// watch it, so Stop takes effect immediately rather than at the end of
+    /// the current step.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -55,6 +66,8 @@ impl AppState {
             mode: RwLock::new(PermissionMode::default()),
             assisted_approval: RwLock::new(true),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            attachments: RwLock::new(Vec::new()),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -161,9 +174,13 @@ pub async fn resolve_approval(
     Ok(session::resolve(&state.pending, &id, outcome).await)
 }
 
-/// Refuse everything still waiting, ending the current run's questions.
+/// Stop the current run at once.
+///
+/// Sets the flag the runner and the HTTP stream both poll, then refuses every
+/// approval still waiting so nothing is left blocked on an answer.
 #[tauri::command]
 pub async fn cancel_run(state: State<'_, AppState>) -> Result<(), String> {
+    state.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     session::reject_all(&state.pending).await;
     Ok(())
 }
@@ -224,7 +241,16 @@ pub async fn run_agent(
             state.client.clone(),
             policy.get(TaskClass::Vision).map(str::to_string),
         );
-    let perms = PermissionEngine::new(&workspace, mode);
+    let mut perms = PermissionEngine::new(&workspace, mode);
+    for file in state.attachments.read().await.iter() {
+        // The file itself, not its directory — dropping one file from Downloads
+        // must not open the rest of Downloads.
+        perms.allow_root(file);
+    }
+
+    // A new run starts uncancelled, whatever the last one ended as.
+    state.cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+
     let runner = AgentRunner::new(
         state.client.clone(),
         perms,
@@ -236,7 +262,8 @@ pub async fn run_agent(
             max_steps: effort.max_steps(),
             ..Default::default()
         },
-    );
+    )
+    .with_cancel(state.cancel.clone());
 
     let gate = session::build_gate(
         app.clone(),
@@ -372,4 +399,114 @@ pub async fn checkpoint_size(state: State<'_, AppState>) -> Result<u64, String> 
         .clone()
         .ok_or("No workspace selected.")?;
     Ok(crate::checkpoint::CheckpointStore::new(workspace).size_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/// One file the user handed to the agent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Attachment {
+    /// The copy the agent sees.
+    pub path: String,
+    /// Where it came from, so the UI can show the real location.
+    pub source: String,
+    pub name: String,
+    pub bytes: u64,
+    /// Which tool will open it, so the UI can say so.
+    pub tool: String,
+}
+
+fn tool_for(path: &std::path::Path) -> &'static str {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "view_image",
+        "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" => "read_document",
+        _ => "read_file",
+    }
+}
+
+/// Where copies are staged.
+///
+/// Outside the workspace, so attachments never end up committed to the user's
+/// project by accident.
+fn attachment_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("cayahub-attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Copy dropped or pasted files somewhere the agent may read them.
+///
+/// The agent gets a *copy*, never the original. It can edit, rewrite, or ruin
+/// an attachment without the user's own file being touched — which matters
+/// because attachments usually come from Downloads or the Desktop, where a
+/// mistake is not recoverable from the project's git history.
+///
+/// Each copy is registered individually as an allowed root: dropping one file
+/// from Downloads must not open the rest of Downloads.
+#[tauri::command]
+pub async fn attach_files(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<Attachment>, String> {
+    let staging = attachment_dir()?;
+    let mut accepted = Vec::new();
+    let mut roots = state.attachments.write().await;
+
+    for raw in paths {
+        let source = crate::perms::normalize(std::path::Path::new(&raw));
+        let meta = std::fs::metadata(&source)
+            .map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} is not a file", source.display()));
+        }
+        // Credentials stay refused however they arrive.
+        if crate::perms::is_sensitive(&source) {
+            return Err(format!(
+                "{} holds credentials and cannot be attached",
+                source.display()
+            ));
+        }
+
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".into());
+
+        // A per-file subdirectory keeps two attachments with the same name apart.
+        let slot = staging.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&slot).map_err(|e| e.to_string())?;
+        let copy = slot.join(&name);
+        std::fs::copy(&source, &copy)
+            .map_err(|e| format!("cannot copy {}: {e}", source.display()))?;
+
+        roots.push(copy.clone());
+        accepted.push(Attachment {
+            name,
+            bytes: meta.len(),
+            tool: tool_for(&copy).into(),
+            path: copy.display().to_string(),
+            source: source.display().to_string(),
+        });
+    }
+    Ok(accepted)
+}
+
+/// Forget every attachment and delete the staged copies.
+#[tauri::command]
+pub async fn clear_attachments(state: State<'_, AppState>) -> Result<(), String> {
+    let mut roots = state.attachments.write().await;
+    for copy in roots.iter() {
+        // Remove the per-file slot, not just the file, so nothing is left behind.
+        if let Some(slot) = copy.parent() {
+            let _ = std::fs::remove_dir_all(slot);
+        }
+    }
+    roots.clear();
+    Ok(())
 }

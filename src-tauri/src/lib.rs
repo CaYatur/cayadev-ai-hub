@@ -40,6 +40,8 @@ pub fn run() {
             commands::checkpoint_list,
             commands::checkpoint_restore,
             commands::checkpoint_size,
+            commands::attach_files,
+            commands::clear_attachments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

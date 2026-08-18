@@ -1272,3 +1272,264 @@
   border-color: var(--border);
   color: var(--text-primary);
 }
+
+/* ============================================================== thinking ==
+ * Reasoning is usually longer than the answer it produces, so it folds away.
+ * The label animates while tokens are still arriving — during a long silent
+ * reasoning pass it is the only sign the model is alive.
+ */
+
+.thinking {
+  align-self: flex-start;
+  max-width: 74ch;
+  width: 100%;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 8px;
+}
+
+.thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 3px 4px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.thinking-head:hover {
+  background: var(--bg-medium);
+}
+
+.thinking-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.thinking-live {
+  /* Slow shimmer rather than a spinner: it reads as "still going" without
+     pulling the eye away from the transcript. */
+  background: linear-gradient(
+    90deg,
+    var(--text-faint) 0%,
+    var(--text-primary) 45%,
+    var(--text-faint) 90%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.1s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 220% 0; }
+  to { background-position: -20% 0; }
+}
+
+.thinking-size {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.thinking-body {
+  margin: 4px 0 6px 18px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--ink-0);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+  animation: unfold 0.15s var(--ease);
+}
+
+@keyframes unfold {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ==================================================== native select menus ==
+ * Windows renders <option> with the system palette unless both colours are
+ * set explicitly, which on a dark page produced white-on-white text.
+ */
+
+.select option,
+.lang-select option {
+  background: var(--bg-medium);
+  color: var(--text-primary);
+}
+
+/* ============================================================== activity == */
+
+.activity-size {
+  float: right;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.ckpt-list,
+.decision-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ckpt {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--ink-1);
+  border: 1px solid var(--line);
+}
+
+.ckpt-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ckpt-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ckpt-files {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ckpt-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.decision {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--text-faint);
+  background: var(--ink-1);
+}
+
+.decision-auto_approved { border-left-color: var(--ok); }
+.decision-user_approved { border-left-color: var(--ok); }
+.decision-denied { border-left-color: var(--primary); }
+.decision-user_rejected { border-left-color: var(--text-faint); }
+.decision-failed { border-left-color: var(--warn); }
+.decision-waiting { border-left-color: var(--info); }
+
+.decision-outcome {
+  flex: 0 0 auto;
+  min-width: 70px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.decision-summary {
+  flex: 0 0 auto;
+  max-width: 40%;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.decision-reason {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* =========================================================== attachments == */
+
+.chat-dropping {
+  outline: 2px dashed var(--primary);
+  outline-offset: -6px;
+  background: var(--primary-glow);
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px 8px;
+}
+
+.attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-medium);
+  font-size: 11.5px;
+  max-width: 260px;
+}
+
+.attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.attachment-size {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 5px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.attachment-remove:hover {
+  color: var(--danger);
+  background: var(--primary-glow);
+}

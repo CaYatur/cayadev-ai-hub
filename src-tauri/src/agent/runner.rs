@@ -17,6 +17,8 @@
 
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::ollama::client::{OllamaClient, StreamEvent};
@@ -83,6 +85,8 @@ pub enum StopReason {
     LoopDetected,
     /// Transport or daemon failure.
     Failed,
+    /// The user pressed Stop.
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -118,11 +122,23 @@ pub struct AgentRunner {
     client: OllamaClient,
     perms: PermissionEngine,
     config: RunConfig,
+    cancel: Arc<AtomicBool>,
 }
 
 impl AgentRunner {
     pub fn new(client: OllamaClient, perms: PermissionEngine, config: RunConfig) -> Self {
-        Self { client, perms, config }
+        Self { client, perms, config, cancel: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Share a cancellation flag with the caller, so Stop can reach a run that
+    /// is already in flight.
+    pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     /// Run until the model stops calling tools, the budget runs out, or it loops.
@@ -147,6 +163,11 @@ impl AgentRunner {
         let mut signature_counts: HashMap<String, usize> = HashMap::new();
 
         for step in 0..self.config.max_steps {
+            if self.cancelled() {
+                let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
+                return StopReason::Cancelled;
+            }
+
             let request = ChatRequest {
                 model: self.config.model.clone(),
                 messages: messages.clone(),
@@ -175,11 +196,18 @@ impl AgentRunner {
                 }
             });
 
-            let response = self.client.chat_stream(request, tx).await;
+            let response = self
+                .client
+                .chat_stream_cancellable(request, tx, self.cancel.clone())
+                .await;
             let _ = pump.await;
 
             let response = match response {
                 Ok(r) => r,
+                Err(crate::ollama::OllamaError::Cancelled) => {
+                    let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
+                    return StopReason::Cancelled;
+                }
                 Err(e) => {
                     let _ = events.send(AgentEvent::Error { message: e.to_string() }).await;
                     let _ = events.send(AgentEvent::Done { reason: StopReason::Failed }).await;
@@ -210,6 +238,10 @@ impl AgentRunner {
             });
 
             for call in &found.calls {
+                if self.cancelled() {
+                    let _ = events.send(AgentEvent::Done { reason: StopReason::Cancelled }).await;
+                    return StopReason::Cancelled;
+                }
                 let name = call.function.name.clone();
                 let args = call.function.arguments_object();
 

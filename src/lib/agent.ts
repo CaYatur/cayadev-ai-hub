@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 export type Placement = "resident" | "marginal" | "spilled" | "cloud" | "unknown";
 
@@ -20,7 +21,20 @@ export type ModelProfile = {
   placement: Placement;
 };
 
-export type PermissionMode = "read_only" | "project_auto" | "balanced" | "unrestricted";
+export type PermissionMode =
+  | "read_only"
+  | "project_auto"
+  | "balanced"
+  | "autonomous"
+  | "unrestricted";
+
+/** A restorable point, one per tool call that changed files. */
+export type Checkpoint = {
+  id: string;
+  timestamp: string;
+  label: string;
+  files: { path: string; kind: string; before: string | null }[];
+};
 
 /** Maps to real levers: thinking on/off and how many tool steps are allowed. */
 export type Effort = "fast" | "balanced" | "thorough";
@@ -94,6 +108,11 @@ export const api = {
   run: (prompt: string, model?: string, numCtx?: number, effort?: Effort) =>
     invoke<string>("run_agent", { prompt, model, numCtx, effort }),
   contextOptions: (model: string) => invoke<ContextOptions>("context_options", { model }),
+  checkpointList: () => invoke<Checkpoint[]>("checkpoint_list"),
+  checkpointRestore: (id: string) => invoke<string[]>("checkpoint_restore", { id }),
+  checkpointSize: () => invoke<number>("checkpoint_size"),
+  attachFiles: (paths: string[]) => invoke<Attachment[]>("attach_files", { paths }),
+  clearAttachments: () => invoke<void>("clear_attachments"),
 };
 
 /** Subscribe to run events and approval questions. */
@@ -109,6 +128,36 @@ export async function subscribe(
     offEvent();
     offApproval();
   };
+}
+
+/** A file the user handed to the agent. */
+export type Attachment = {
+  path: string;
+  name: string;
+  bytes: number;
+  /** Which tool will open it, so the UI can say so. */
+  tool: string;
+};
+
+/**
+ * Files dropped onto the window.
+ *
+ * The webview's own drag events never fire for OS file drops in a Tauri
+ * window — the native side intercepts them — so this listens to Tauri's
+ * event instead. `hover` and `cancel` drive the drop-target highlight.
+ */
+export async function onFileDrop(
+  onDrop: (paths: string[]) => void,
+  onHover: (over: boolean) => void,
+): Promise<UnlistenFn> {
+  return getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "over") onHover(true);
+    else if (event.payload.type === "leave") onHover(false);
+    else if (event.payload.type === "drop") {
+      onHover(false);
+      onDrop(event.payload.paths);
+    }
+  });
 }
 
 export function formatBytes(n: number): string {

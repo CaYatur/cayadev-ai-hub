@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
+  formatBytes,
+  type Attachment,
   type ContextOptions,
   type Effort,
   type ModelProfile,
@@ -20,7 +22,13 @@ import {
 } from "../lib/sessions";
 import { Popover, PopoverDivider, PopoverItem, PopoverLabel } from "./Popover";
 
-const MODES: PermissionMode[] = ["read_only", "project_auto", "balanced", "unrestricted"];
+const MODES: PermissionMode[] = [
+  "read_only",
+  "project_auto",
+  "balanced",
+  "autonomous",
+  "unrestricted",
+];
 const EFFORTS: Effort[] = ["fast", "balanced", "thorough"];
 
 /** A tool call, collapsed to one scannable line until the user opens it. */
@@ -61,6 +69,32 @@ function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A model's reasoning, folded away by default.
+ *
+ * On a thinking-capable model this is routinely longer than the answer, so it
+ * collapses to one line and expands on click. The label animates while tokens
+ * are still arriving, which is the only signal that anything is happening
+ * during a long silent reasoning pass.
+ */
+function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className={open ? "thinking thinking-open" : "thinking"}>
+      <button className="thinking-head" onClick={() => setOpen((v) => !v)}>
+        <span className={open ? "chev chev-open" : "chev"}>›</span>
+        <span className={live ? "thinking-label thinking-live" : "thinking-label"}>
+          {live ? t("chat.thinkingLive") : t("chat.thinking")}
+        </span>
+        <span className="thinking-size">{text.trim().split(/\s+/).length}</span>
+      </button>
+      {open && <div className="thinking-body">{text}</div>}
     </div>
   );
 }
@@ -172,6 +206,9 @@ export default function Chat({
   model,
   effort,
   numCtx,
+  attachments,
+  dropping,
+  onDetach,
   onSend,
   onAnswer,
   onWorkspace,
@@ -197,6 +234,9 @@ export default function Chat({
   model: string;
   effort: Effort;
   numCtx: number | null;
+  attachments: Attachment[];
+  dropping: boolean;
+  onDetach: (path: string) => void;
   onSend: (text: string) => void;
   onAnswer: (approved: boolean) => void;
   onWorkspace: (path: string) => void;
@@ -221,7 +261,13 @@ export default function Chat({
     bottom.current?.scrollIntoView({ behavior: "smooth" });
   }, [session.entries.length, pending]);
 
-  const usable = useMemo(() => models.filter((m) => m.capabilities.tools), [models]);
+  // Cloud models report no capability metadata, so filtering on `tools` would
+  // hide them entirely. They are listed and labelled instead — whether tool
+  // calling works is between the user and the remote model.
+  const usable = useMemo(
+    () => models.filter((m) => m.capabilities.tools || m.placement === "cloud"),
+    [models],
+  );
 
   // With no explicit pick, routing decides — so resolve what it would choose
   // rather than showing nothing. A context meter that reads "—" by default is
@@ -269,6 +315,7 @@ export default function Chat({
   }
 
   function send() {
+    // The box stays editable during a run, so this is where sending is refused.
     if (!prompt.trim() || running) return;
     onSend(prompt);
     setPrompt("");
@@ -277,7 +324,7 @@ export default function Chat({
   const folderName = session.workspace?.split(/[\\/]/).filter(Boolean).pop();
 
   return (
-    <div className="chat">
+    <div className={dropping ? "chat chat-dropping" : "chat"}>
       <header className="chat-head">
         <div className="chat-title" title={session.title}>
           {session.title}
@@ -322,6 +369,11 @@ export default function Chat({
                 onBranch={onBranch}
               />
             );
+          }
+          if (entry.kind === "thinking") {
+            // Only the last entry can still be receiving tokens.
+            const live = running && i === session.entries.length - 1;
+            return <ThinkingBlock key={i} text={entry.text} live={live} />;
           }
           if (entry.kind === "assistant") {
             return entry.text.trim() ? (
@@ -369,11 +421,34 @@ export default function Chat({
       )}
 
       <div className="composer">
+        {attachments.length > 0 && (
+          <div className="attachments">
+            {attachments.map((a) => (
+              <span key={a.path} className="attachment" title={`${a.path} · ${a.tool}`}>
+                <span className="attachment-name">{a.name}</span>
+                <span className="attachment-size">{formatBytes(a.bytes)}</span>
+                <button
+                  className="attachment-remove"
+                  onClick={() => onDetach(a.path)}
+                  title={t("chat.detach")}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="composer-box">
           <textarea
             className="input"
             rows={2}
-            placeholder={session.workspace ? t("chat.placeholder") : t("chat.placeholderNoFolder")}
+            placeholder={
+              running
+                ? t("chat.placeholderBusy")
+                : session.workspace
+                  ? t("chat.placeholder")
+                  : t("chat.placeholderNoFolder")
+            }
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => {
@@ -382,7 +457,11 @@ export default function Chat({
                 send();
               }
             }}
-            disabled={running || !session.workspace}
+            // Deliberately not disabled while a run is in flight: composing the
+            // next instruction is the natural thing to do while waiting, and a
+            // dead text box for a minute is the wrong answer. Only sending is
+            // blocked.
+            disabled={!session.workspace}
           />
           <button
             className="send"
@@ -413,6 +492,7 @@ export default function Chat({
                   selected={mode === m}
                   shortcut={String(i + 1)}
                   danger={m === "unrestricted"}
+                  badge={m === "autonomous" ? t("modes.recommended") : undefined}
                   onClick={() => changeMode(m)}
                 />
               ))}

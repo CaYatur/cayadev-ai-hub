@@ -15,6 +15,8 @@
 //! get separate budgets, because the first is expected to be slow.
 
 use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -36,6 +38,9 @@ pub enum OllamaError {
 
     #[error("malformed response: {0}")]
     Decode(String),
+
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, OllamaError>;
@@ -191,8 +196,25 @@ impl OllamaClient {
     /// stream fails fast while a slow-but-alive one runs as long as it needs.
     pub async fn chat_stream(
         &self,
+        req: ChatRequest,
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<ChatResponse> {
+        self.chat_stream_cancellable(req, tx, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// Streaming chat that stops as soon as `cancel` is set.
+    ///
+    /// The flag is checked before each chunk rather than only between steps.
+    /// Dropping the response body closes the connection, so the daemon stops
+    /// generating too — a Stop button that only takes effect at the end of the
+    /// current turn is not a Stop button on a model producing five tokens a
+    /// second.
+    pub async fn chat_stream_cancellable(
+        &self,
         mut req: ChatRequest,
         tx: mpsc::Sender<StreamEvent>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<ChatResponse> {
         req.stream = true;
         let model = req.model.clone();
@@ -222,6 +244,10 @@ impl OllamaClient {
         let started = Instant::now();
 
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                // Dropping `stream` here closes the connection.
+                return Err(OllamaError::Cancelled);
+            }
             let budget = if seen_any { self.timeouts.idle } else { self.timeouts.first_token };
 
             let next = tokio::time::timeout(Duration::from_secs(budget), stream.next()).await;

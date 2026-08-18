@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use command::{classify_command, CommandRisk};
-pub use path::{contains, is_checkpoint_store, normalize};
+pub use path::{contains, is_checkpoint_store, is_sensitive, normalize};
 
 /// How much the agent may do without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +33,17 @@ pub enum PermissionMode {
     /// As `ProjectAuto`, plus commands the rules classify as read-only
     /// (`git status`, `ls`, `cargo check`) run automatically.
     Balanced,
+    /// Nothing that only affects this machine interrupts: reads, writes in the
+    /// workspace, ordinary commands, web access, and screen capture all run.
+    ///
+    /// The trade is auditing, not trust. Every automatic decision is recorded
+    /// with its reason, file changes are checkpointed and revertible, and three
+    /// things still stop the agent: commands that can destroy data, anything
+    /// reaching outside the workspace, and anything other people would see.
+    ///
+    /// This is the mode to work in. `Unrestricted` removes the first two of
+    /// those brakes as well, which is a different and much worse bargain.
+    Autonomous,
     /// Everything runs unattended, including destructive commands and writes
     /// outside the workspace.
     ///
@@ -167,11 +178,19 @@ impl PermissionEngine {
             Action::DeleteFile { path } => self.eval_write(path, true),
             Action::RunCommand { program, args, cwd } => self.eval_command(program, args, cwd.as_deref()),
             Action::Network { url } => self.eval_network(url),
-            Action::CaptureScreen { what } => Evaluation::ask(
-                format!("Capture {what} and send the image to a model."),
-                CommandRisk::ReadOnly,
-                true,
-            ),
+            Action::CaptureScreen { what } => match self.mode {
+                // The user asked for this to be automatic, and it is their
+                // screen. It is still recorded, so what was captured and when
+                // is reviewable afterwards.
+                PermissionMode::Autonomous | PermissionMode::Unrestricted => {
+                    Evaluation::allow(format!("Captured {what}, and it is logged."))
+                }
+                _ => Evaluation::ask(
+                    format!("Capture {what} and send the image to a model."),
+                    CommandRisk::ReadOnly,
+                    true,
+                ),
+            },
             Action::Publish { summary } => Evaluation::ask(
                 format!("{summary}. This is visible to other people."),
                 CommandRisk::Mutating,
@@ -239,9 +258,9 @@ impl PermissionEngine {
                 CommandRisk::Mutating,
                 false,
             ),
-            PermissionMode::ProjectAuto | PermissionMode::Balanced => {
-                Evaluation::allow("Write inside the workspace.")
-            }
+            PermissionMode::ProjectAuto
+            | PermissionMode::Balanced
+            | PermissionMode::Autonomous => Evaluation::allow("Write inside the workspace."),
         }
     }
 
@@ -274,15 +293,18 @@ impl PermissionEngine {
                 _ => Evaluation::ask("Command can destroy data.", risk, false),
             },
             CommandRisk::Mutating => match self.mode {
+                PermissionMode::Autonomous => {
+                    Evaluation::allow("Autonomous mode: command changes state, and is logged.")
+                }
                 PermissionMode::Unrestricted => {
                     Evaluation::allow("Unrestricted mode: command allowed.")
                 }
                 _ => Evaluation::ask("Command changes state.", risk, false),
             },
             CommandRisk::ReadOnly => match self.mode {
-                PermissionMode::Balanced | PermissionMode::Unrestricted => {
-                    Evaluation::allow("Read-only command.")
-                }
+                PermissionMode::Balanced
+                | PermissionMode::Autonomous
+                | PermissionMode::Unrestricted => Evaluation::allow("Read-only command."),
                 _ => Evaluation::ask("Command execution is confirmed in this mode.", risk, false),
             },
         }
@@ -296,6 +318,11 @@ impl PermissionEngine {
             return Evaluation::allow("Request to the local machine.");
         }
         match self.mode {
+            // Reading a public page is not a side effect worth a prompt, and
+            // stopping to confirm every search is what makes research unusable.
+            PermissionMode::Autonomous => {
+                Evaluation::allow("Autonomous mode: web access, and it is logged.")
+            }
             PermissionMode::Unrestricted => Evaluation::allow("Unrestricted mode: network allowed."),
             _ => Evaluation::ask("Request leaves this machine.", CommandRisk::Mutating, true),
         }
@@ -411,6 +438,59 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_mode_runs_ordinary_work_without_asking() {
+        let engine = engine(PermissionMode::Autonomous);
+        let allowed = [
+            Action::ReadFile { path: inside("src/main.rs") },
+            Action::WriteFile { path: inside("src/main.rs") },
+            Action::ListDir { path: inside("src") },
+            Action::Network { url: "https://example.com".into() },
+            Action::CaptureScreen { what: "this screen".into() },
+            Action::RunCommand {
+                program: "npm".into(),
+                args: vec!["install".into()],
+                cwd: Some(workspace_root()),
+            },
+        ];
+        for action in allowed {
+            assert_eq!(
+                engine.evaluate(&action).decision,
+                Decision::Allow,
+                "autonomous mode should not interrupt for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn autonomous_mode_still_stops_for_the_three_things_that_matter() {
+        let engine = engine(PermissionMode::Autonomous);
+
+        // Destroys work.
+        let destructive = Action::RunCommand {
+            program: "git".into(),
+            args: vec!["reset".into(), "--hard".into()],
+            cwd: Some(workspace_root()),
+        };
+        assert_eq!(engine.evaluate(&destructive).decision, Decision::Ask);
+
+        // Leaves the workspace.
+        let outside = Action::WriteFile { path: outside("notes.txt") };
+        assert_eq!(engine.evaluate(&outside).decision, Decision::Ask);
+
+        // Other people see it.
+        let publish = Action::Publish { summary: "Open a pull request".into() };
+        assert_eq!(engine.evaluate(&publish).decision, Decision::Ask);
+
+        // And the absolute refusals still hold.
+        let catastrophic = Action::RunCommand {
+            program: "rm".into(),
+            args: vec!["-rf".into(), "/".into()],
+            cwd: Some(workspace_root()),
+        };
+        assert_eq!(engine.evaluate(&catastrophic).decision, Decision::Deny);
+    }
+
+    #[test]
     fn balanced_mode_still_confirms_mutating_commands() {
         let e = engine(PermissionMode::Balanced).evaluate(&Action::RunCommand {
             program: "git".into(),
@@ -480,12 +560,19 @@ mod tests {
     }
 
     #[test]
-    fn screen_capture_is_confirmed_even_in_unrestricted_mode() {
-        // The frame holds whatever else is open, which the user did not choose
-        // to share with a model.
-        let e = engine(PermissionMode::Unrestricted)
-            .evaluate(&Action::CaptureScreen { what: "this screen".into() });
-        assert_eq!(e.decision, Decision::Ask);
+    fn screen_capture_is_confirmed_until_the_user_opts_out() {
+        // The frame holds whatever else happens to be open, so the cautious
+        // modes ask. Autonomous and Unrestricted are the user saying they do
+        // not want to be asked about their own screen; the capture is recorded
+        // instead.
+        for mode in [PermissionMode::ReadOnly, PermissionMode::ProjectAuto, PermissionMode::Balanced] {
+            let e = engine(mode).evaluate(&Action::CaptureScreen { what: "this screen".into() });
+            assert_eq!(e.decision, Decision::Ask, "{mode:?}");
+        }
+        for mode in [PermissionMode::Autonomous, PermissionMode::Unrestricted] {
+            let e = engine(mode).evaluate(&Action::CaptureScreen { what: "this screen".into() });
+            assert_eq!(e.decision, Decision::Allow, "{mode:?}");
+        }
     }
 
     #[test]
