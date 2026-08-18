@@ -1,7 +1,7 @@
 //! Model registry: capability detection, memory-fit estimation, and routing.
 //!
 //! The measurements in `docs/BENCHMARKS.md` drive everything here. The headline
-//! result — a 7B model resident in VRAM decodes ~10x faster than a 27B model
+//! result — a 7B model resident in VRAM decodes ~8x faster than a 27B model
 //! that spilled to system RAM — means the highest-leverage decision the app
 //! makes is *which model runs this step*, not how a single model is tuned.
 
@@ -214,41 +214,51 @@ impl RoutingPolicy {
     pub fn derive(profiles: &[ModelProfile]) -> Self {
         let mut policy = Self { prefer_resident: true, ..Default::default() };
 
-        let resident = |p: &&ModelProfile| {
-            matches!(p.placement, Placement::Resident | Placement::Marginal)
-        };
-        let local = |p: &&ModelProfile| !p.is_cloud();
+        let candidates: Vec<&ModelProfile> = profiles.iter().filter(|p| !p.is_cloud()).collect();
 
-        // Smallest tool-capable resident model, for constant cheap decisions.
-        let classifier = profiles
-            .iter()
-            .filter(local)
-            .filter(resident)
-            .filter(|p| p.capabilities.completion)
-            .min_by_key(|p| p.weights_bytes);
+        // Rank placement above size. A 4.6 GB model that only just fits is a
+        // worse pick than a 4.4 GB one with headroom, and both beat a 17 GB
+        // model that spilled — measured at ~8x slower. Sorting by size alone
+        // inverts all of that.
+        fn score(p: &&ModelProfile) -> (u8, u64) {
+            (placement_rank(p.placement), p.weights_bytes)
+        }
 
-        // Largest resident tool-capable model, for real work.
-        let workhorse = profiles
+        let workhorse = candidates
             .iter()
-            .filter(local)
-            .filter(resident)
+            .copied()
             .filter(|p| p.capabilities.tools)
-            .max_by_key(|p| p.weights_bytes);
+            .max_by_key(|p| score(&p));
 
-        // Best reasoner: prefer a resident thinker, else the biggest local one.
-        let reasoner = profiles
-            .iter()
-            .filter(local)
-            .filter(|p| p.capabilities.tools)
-            .filter(|p| resident(p) && p.capabilities.thinking)
-            .max_by_key(|p| p.weights_bytes)
+        // Reasoning prefers a thinking model, but only one that is not a large
+        // step down in capability. Without that guard a 0.8B thinker outranks a
+        // 7B workhorse for planning, which is exactly backwards.
+        let reasoner = workhorse
+            .and_then(|best| {
+                candidates
+                    .iter()
+                    .copied()
+                    .filter(|p| p.capabilities.tools && p.capabilities.thinking)
+                    .filter(|p| placement_rank(p.placement) >= placement_rank(best.placement))
+                    .filter(|p| p.weights_bytes * 2 >= best.weights_bytes)
+                    .max_by_key(|p| score(&p))
+            })
             .or(workhorse);
 
-        let vision = profiles
+        // Classification runs constantly, so it takes the cheapest model that
+        // is resident — speed matters far more than capability here.
+        let classifier = candidates
             .iter()
-            .filter(local)
+            .copied()
+            .filter(|p| p.capabilities.completion && is_resident(p.placement))
+            .min_by_key(|p| p.weights_bytes)
+            .or(workhorse);
+
+        let vision = candidates
+            .iter()
+            .copied()
             .filter(|p| p.capabilities.vision)
-            .min_by_key(|p| (!resident(&p) as u8, p.weights_bytes));
+            .max_by_key(|p| score(&p));
 
         if let Some(m) = reasoner {
             policy.set(TaskClass::Reasoning, &m.name);
@@ -267,6 +277,21 @@ impl RoutingPolicy {
         policy
     }
 }
+
+/// Ordering weight for placement. Higher is better.
+fn placement_rank(p: Placement) -> u8 {
+    match p {
+        Placement::Resident => 3,
+        Placement::Marginal => 2,
+        Placement::Cloud => 1,
+        Placement::Spilled | Placement::Unknown => 0,
+    }
+}
+
+fn is_resident(p: Placement) -> bool {
+    matches!(p, Placement::Resident | Placement::Marginal)
+}
+
 
 /// Load every installed model's profile.
 ///
@@ -404,6 +429,44 @@ mod tests {
         assert_eq!(policy.get(TaskClass::Coding), Some("coder:7b"));
         // The spilled 27B never wins a slot while a resident model can do it.
         assert_eq!(policy.get(TaskClass::Reasoning), Some("coder:7b"));
+    }
+
+    #[test]
+    fn placement_outranks_size_when_choosing_a_workhorse() {
+        // Taken from a real installation. Sorting by size alone picks
+        // llama3.1 (4.6 GB, Marginal) over qwen2.5-coder:7b (4.4 GB,
+        // Resident) — slower, less headroom, and worse at the actual task.
+        let profiles = vec![
+            profile("qwen2.5-coder:7b", 4_400_000_000, Placement::Resident, true, false),
+            profile("llama3.1:latest", 4_600_000_000, Placement::Marginal, true, false),
+            profile("qwen3.8:latest", 17 * GB, Placement::Spilled, true, true),
+        ];
+        let policy = RoutingPolicy::derive(&profiles);
+        assert_eq!(policy.get(TaskClass::Coding), Some("qwen2.5-coder:7b"));
+    }
+
+    #[test]
+    fn a_tiny_thinking_model_does_not_win_reasoning() {
+        // Also from a real installation: qwen3.5:0.8b is resident and has the
+        // thinking capability, but routing planning to a 0.8B model over a 7B
+        // one is backwards. Thinking is a tiebreak, not a trump card.
+        let profiles = vec![
+            profile("qwen3.5:0.8b", 1_000_000_000, Placement::Resident, true, true),
+            profile("qwen2.5-coder:7b", 4_400_000_000, Placement::Resident, true, false),
+        ];
+        let policy = RoutingPolicy::derive(&profiles);
+        assert_eq!(policy.get(TaskClass::Reasoning), Some("qwen2.5-coder:7b"));
+    }
+
+    #[test]
+    fn a_comparable_thinking_model_does_win_reasoning() {
+        // The tiebreak still applies when the thinker is in the same class.
+        let profiles = vec![
+            profile("thinker:7b", 4_500_000_000, Placement::Resident, true, true),
+            profile("coder:7b", 4_400_000_000, Placement::Resident, true, false),
+        ];
+        let policy = RoutingPolicy::derive(&profiles);
+        assert_eq!(policy.get(TaskClass::Reasoning), Some("thinker:7b"));
     }
 
     #[test]

@@ -15,7 +15,14 @@ everything else is not built yet, however well specified it looks.
 - **VRAM fit estimation** that accounts for hybrid attention
   (`full_attention_interval`), so it does not overestimate the cache by 4x on
   SSM-hybrid models like `qwen3.8`
-- **Task-based routing policy** derived automatically from installed models
+- **Task-based routing policy** derived automatically from installed models,
+  ranking placement above raw size — a resident 4.4 GB model beats a marginal
+  4.6 GB one, and a small thinking model does not outrank a much larger
+  workhorse for planning
+- Tauri command layer (`list_models`, `routing_policy`, `ollama_version`), so
+  the UI never calls the daemon cross-origin
+- Live integration tests against a real daemon (`cargo test --test live_ollama
+  -- --ignored`), which is how both routing bugs above were found
 
 ### Agent reliability — `src-tauri/src/agent/`
 - **Tolerant tool-call extraction**: native field, `<tool_call>` tags, fenced
@@ -44,6 +51,17 @@ everything else is not built yet, however well specified it looks.
 - Reproducible benchmark harness (`scripts/bench.py`) that pins `num_ctx` and
   records the placement the daemon actually chose
 - Results published in [`BENCHMARKS.md`](BENCHMARKS.md)
+
+## Known gaps
+
+- **The VRAM budget is assumed, not probed.** It defaults to 8 GB total with
+  2 GB reserved. On the development machine that marks `qwen3-vl:8b` (5.7 GB)
+  as spilled, but it was measured running fully on the GPU at 21 tok/s — the
+  reserve is too pessimistic by a few hundred megabytes. A real probe of free
+  VRAM is the fix; until then `set_vram_budget` lets the UI correct it.
+- Because of that, vision currently routes to the only model the estimate calls
+  resident, which is smaller than ideal for image work. Recalibrating the budget
+  should change that decision on its own.
 
 ## Next
 

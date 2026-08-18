@@ -46,6 +46,9 @@ similar = "2"
 regex = "1"
 dirs = "6"
 
+[dev-dependencies]
+tokio-test = "0.4"
+
 [profile.release]
 codegen-units = 1
 lto = true

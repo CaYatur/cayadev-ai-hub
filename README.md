@@ -82,10 +82,16 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
 
 ## Status
 
-Early. The Rust core — Ollama client, model registry and routing, tolerant
-tool-call parsing, and the permission engine — is implemented and unit-tested.
-The desktop UI and the wider tool surface are in progress. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for what is built and what is not.
+Early, and specific about it. The Rust core — Ollama client, model registry and
+routing, tolerant tool-call parsing, and the permission engine — is implemented
+and covered by 79 unit tests plus live integration tests against a real daemon.
+The app builds, launches, and lists your models with their placement and the
+routing policy derived from them.
+
+**There is no agent loop yet.** You cannot run an agent from this build. The
+runner, the tool surface, and the chat UI are the next work — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md), which distinguishes what is built from
+what is only specified.
 
 ## Requirements
 
