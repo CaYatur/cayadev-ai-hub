@@ -65,3 +65,27 @@ async fn a_dead_host_fails_with_a_readable_message() {
     // The model needs to understand it and move on, not retry blindly.
     assert!(err.contains("cannot fetch"), "unhelpful error: {err}");
 }
+
+#[tokio::test]
+#[ignore = "requires internet access"]
+async fn a_turkish_page_reads_without_panicking() {
+    // The page that actually crashed the app. Turkish text is full of letters
+    // whose byte length changes under Unicode lowercasing, which is what broke
+    // the offset arithmetic in `html_to_text`.
+    let tools = WebTools::new();
+    let out = tools
+        .execute("web_read", &args(json!({"url": "https://cayadev.com"})))
+        .await
+        .expect("a Turkish page must not panic or fail");
+
+    println!("\n{}", out.chars().take(700).collect::<String>());
+
+    assert!(out.contains("UNTRUSTED CONTENT"));
+    // Turkish characters must survive rather than arriving as mojibake.
+    assert!(
+        out.chars().any(|c| "ıİğĞüÜşŞöÖçÇ".contains(c)),
+        "no Turkish characters survived — they were probably mangled"
+    );
+    assert!(!out.contains("\u{fffd}"), "replacement characters in output");
+    assert!(!out.contains("<script"), "raw markup leaked");
+}

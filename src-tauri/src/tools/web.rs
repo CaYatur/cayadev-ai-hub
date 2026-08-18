@@ -262,15 +262,26 @@ fn percent_decode(text: &str) -> String {
 /// block-level tags become newlines, everything else is unwrapped. That is
 /// enough for a model to read an article, and it adds no dependency.
 pub fn html_to_text(html: &str) -> String {
-    let mut text = String::with_capacity(html.len() / 2);
-    let bytes = html.as_bytes();
-    let mut i = 0;
-    let lower = html.to_lowercase();
+    // ASCII lowercasing, deliberately, not `to_lowercase`. Unicode lowercasing
+    // changes byte lengths — Turkish 'I' becomes a two-byte 'ı' — so the two
+    // strings would disagree about every offset after the first such letter,
+    // and slicing one at an index found in the other panics mid-character.
+    // HTML tag names are ASCII, so this loses nothing.
+    let lower = html.to_ascii_lowercase();
+    debug_assert_eq!(lower.len(), html.len(), "offsets must stay aligned");
 
-    while i < bytes.len() {
-        if bytes[i] != b'<' {
-            text.push(bytes[i] as char);
-            i += 1;
+    let mut text = String::with_capacity(html.len() / 2);
+    let mut i = 0usize;
+
+    while i < html.len() {
+        let rest = &html[i..];
+        let Some(ch) = rest.chars().next() else { break };
+
+        if ch != '<' {
+            // Push the whole character. Pushing one byte at a time would split
+            // every non-ASCII letter into mojibake.
+            text.push(ch);
+            i += ch.len_utf8();
             continue;
         }
 
@@ -278,7 +289,10 @@ pub fn html_to_text(html: &str) -> String {
         let mut skipped = false;
         for (open, close) in [("<script", "</script>"), ("<style", "</style>"), ("<!--", "-->")] {
             if lower[i..].starts_with(open) {
-                i = lower[i..].find(close).map(|j| i + j + close.len()).unwrap_or(bytes.len());
+                i = lower[i..]
+                    .find(close)
+                    .map(|j| i + j + close.len())
+                    .unwrap_or(html.len());
                 skipped = true;
                 break;
             }
@@ -287,7 +301,9 @@ pub fn html_to_text(html: &str) -> String {
             continue;
         }
 
-        let Some(end) = html[i..].find('>') else { break };
+        // `<` and `>` are ASCII, so every index derived from them is a char
+        // boundary and these slices are safe.
+        let Some(end) = rest.find('>') else { break };
         let tag = lower[i + 1..i + end].trim_start_matches('/');
         const BLOCKS: &[&str] = &[
             "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section",
@@ -384,6 +400,39 @@ mod tests {
 
         // Inline tags must not split a sentence.
         assert_eq!(html_to_text("<span>one <b>two</b></span>"), "one two");
+    }
+
+    #[test]
+    fn non_ascii_pages_do_not_panic() {
+        // This crashed the app on a real Turkish page. Two causes: byte-at-a-time
+        // pushing mangled multi-byte letters, and `to_lowercase` changed the
+        // byte length ('I' -> 'ı'), so an index found in the lowercased copy
+        // landed mid-character in the original.
+        let html = "<!doctype html><html lang=\"tr\"><head>\
+                    <!-- cayadev sistemleri. tüm hakları saklıdır. -->\
+                    <style>body{color:red}</style></head>\
+                    <body><h1>Işık ve Şığır</h1>\
+                    <p>Türkçe karakterler: ıİğĞüÜşŞöÖçÇ</p>\
+                    <script>var x = 'ı';</script></body></html>";
+
+        let text = html_to_text(html);
+        assert!(text.contains("Işık ve Şığır"), "got: {text}");
+        assert!(text.contains("ıİğĞüÜşŞöÖçÇ"), "characters were mangled: {text}");
+        assert!(!text.contains("color:red"));
+        assert!(!text.contains("var x"));
+        assert!(!text.contains("saklıdır"), "comment leaked: {text}");
+    }
+
+    #[test]
+    fn a_dotless_i_before_a_tag_stays_on_a_boundary() {
+        // The narrowest form of the crash: a multi-byte letter immediately
+        // before markup, where a stale byte offset would split it.
+        for filler in ["ı", "İ", "ğ", "€", "🙂"] {
+            let html = format!("<p>{}</p><div>after</div>", filler.repeat(50));
+            let text = html_to_text(&html);
+            assert!(text.contains(&filler.repeat(50)), "mangled {filler}");
+            assert!(text.contains("after"));
+        }
     }
 
     #[test]
