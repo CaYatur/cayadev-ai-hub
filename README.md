@@ -61,13 +61,23 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
 - Invented tool names are corrected rather than treated as an answer
 - Loop detection, schema validation, and a step budget
 - Idle-based timeouts, so a slow prefill is never mistaken for a hang
-- Stop actually stops: the flag is polled before every chunk
+- Stop actually stops: the flag is polled before every chunk, and it also
+  reaches a run parked on an approval or a question
+- The conversation is trimmed before it is sent, from the middle, keeping the
+  system prompt, the current instruction and the recent steps — Ollama truncates
+  from the front, which is where the task lives
+- Earlier turns are replayed, with each tool call folded to one summary line, so
+  a follow-up knows both what was said and what was already done
+- The agent asks rather than guessing: `ask_user` offers choices or a written
+  answer, and Skip is reported as a skip
 
 **Speed**
 - Task-based routing across reasoning / coding / edit / classify / vision
 - GPU memory read from the driver, not assumed
 - Byte-stable prompt prefixes — a reused prefix prefills **14.8x** faster
 - The tool list is trimmed to what the running model can choose between
+- Live tok/s and context occupancy, measured from the first token rather than
+  reported after the step
 
 **Safety**
 - Five permission modes, from read-only to unrestricted
@@ -79,7 +89,10 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
 - Optional model-assisted approval that can only turn "ask" into "allow", is
   never shown a destructive call, and receives computed facts rather than any
   attacker-controllable text
-- Every agent edit is checkpointed and revertible from the Activity page
+- Every agent edit is checkpointed and revertible from the Activity page —
+  stored outside the project, so the agent never finds the app's own journal
+- Attachments are copied before the agent sees them, so it can ruin one without
+  touching the user's file
 
 **Reach**
 - Files: read, write, edit, list, search
@@ -88,10 +101,12 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
   multi-command flows collapsed into single calls so small models finish them
 - Web search and page reading, no API key
 - Documents: PDF, Word, Excel, PowerPoint, CSV
-- Images and screenshots, delegated to a vision model so the coding model does
-  not have to be multimodal
+- Attached images go straight into the message, on a model that can see them —
+  no second hop through a tool call
+- Screenshots of this machine, and Android devices over ADB
 - Audio transcription, and video by frame extraction
-- Android devices over ADB
+- Replies rendered as markdown, with syntax colouring and links that open —
+  a web link in the browser, a file path in its application
 - Turkish and English interface, Turkish by default
 
 ## Requirements

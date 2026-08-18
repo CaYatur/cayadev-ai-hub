@@ -31,6 +31,14 @@ everything else is not built yet, however well specified it looks.
   wording produced five false tool calls out of eight greetings; the current one
   produces none
 - Tool-list trimming ordered by usefulness rather than by assembly order
+- **Conversation memory**: earlier turns replayed between the system prompt and
+  the instruction, each tool call folded to one summary line, so a follow-up
+  knows what was said *and* what was done without carrying the tool output
+- **Trimming before sending, from the middle**, pinning the system prompt, the
+  current instruction and the recent steps — Ollama truncates from the front,
+  which is where the task is, and its template then answers
+  `500 no user query found in messages`. Cuts well under the threshold so
+  several steps pass before the next trim and the KV prefix survives them
 - Model-assisted approval that can only soften "ask" to "allow", never sees a
   destructive call, and receives sanitised computed facts
 
@@ -42,7 +50,8 @@ everything else is not built yet, however well specified it looks.
   and backticks
 - Credentials, system paths, the checkpoint store, and catastrophic commands
   refused in *every* mode
-- `Publish` and `CaptureScreen` as distinct decisions rather than incidental ones
+- `Publish` and `CaptureScreen` as distinct decisions rather than incidental
+  ones; `AskUser` allowed in every mode, since refusing it means guessing
 
 ### Tools — `src-tauri/src/tools/`
 - Files: read, write, edit, list, and **search** (contents and names, skipping
@@ -52,22 +61,40 @@ everything else is not built yet, however well specified it looks.
   with `gh_open_pr` and `gh_create_release` collapsing multi-command flows into
   one call
 - Web search and page reading, wrapped in an untrusted-content marker
-- Documents through a Python sidecar; images and screens through the routed
-  vision model; **audio transcription** and **video by frame extraction**
-- ADB: devices, screen, UI hierarchy, logcat
+- Documents through a Python sidecar; **audio transcription** and **video by
+  frame extraction**
+- **Attached images ride in the message**, on a model that can see them — the
+  run is handed to one if the chosen model cannot, and carries no tool field at
+  all for the vision models that cannot call tools
+- Screen capture of this machine, and ADB: devices, screen, UI hierarchy, logcat
+- **`ask_user`**: a question to the user mid-run, with choices or a written
+  answer, riding the approval channel's shape but its own map
 - Every tool hides itself when its dependency is missing
+- Every child process is spawned with `CREATE_NO_WINDOW`, so nothing flashes a
+  console on Windows
 
 ### Checkpoints — `src-tauri/src/checkpoint/`
 - Prior contents captured before every write and edit, content-addressed so
   repeated edits to unchanged files cost one object
 - Restorable from the Activity page
+- Stored **outside the project**, one directory per workspace under the OS data
+  directory. In `.cayahub/` the agent found the app's own journal, read it, and
+  spent steps reasoning about it — and it showed up in searches and git status
 
 ### Interface
 - Session sidebar, streaming chat, collapsible tool rows, message actions
 - Composer controls for permission mode, model, effort, and context window
-- **Collapsible reasoning blocks** with a live label
+- **Collapsible reasoning blocks** with a live label, following their own text
+- **Markdown replies**: headings, lists, tables, syntax-coloured code, and links
+  that open — a URL in the browser, a file path in its application, except for
+  extensions that would run something, which are revealed in the file manager
 - Attachments by drag-and-drop or paste — the agent gets a **copy**, never the
-  original
+  original — shown with a preview on the turn that sent them, and gone from the
+  composer once sent
+- **Live tok/s and context occupancy**, timed from the first token so a cold
+  model load is not averaged into the rate
+- Following the newest output, and stopping the moment the user scrolls away
+- A question panel for `ask_user`: choices, a written answer, or Skip
 - Activity page: every checkpoint with a revert button, every decision with its
   reason
 - Turkish and English, Turkish by default
@@ -81,11 +108,12 @@ everything else is not built yet, however well specified it looks.
 
 ## Known gaps
 
-- **The tool-budget numbers are judgement, not measurement.** 6 for the smallest
-  tier and 13 for the middle one were chosen to hold the core tools plus one
-  capability from each family. Live tests confirm a 7B still finishes a task at
-  13 and a 0.5B still produces usable calls at 6; where either actually degrades
-  has not been measured.
+- **The smallest tool budget is judgement, not measurement.** Six for the
+  smallest tier was chosen to hold the core tools; a 0.5B still produces usable
+  calls there, but where it actually degrades has not been measured. The middle
+  tier's sixteen *is* measured — `scripts/drift.py` offers exactly that surface
+  to qwen2.5-coder:7b and it makes no false calls on eight conversational inputs
+  and misses none of eight tasks.
 - **GPU probing is NVIDIA-only.** AMD and Intel hosts fall back to a fixed
   assumption, and `refresh_vram_budget` returns an error there.
 - **Windows-only testing.** Nothing is deliberately platform-specific, but the
