@@ -300,7 +300,7 @@ export default function App() {
   }, []);
 
   const run = useCallback(
-    async (id: string, text: string, history: Turn[]) => {
+    async (id: string, text: string, history: Turn[], files: Attachment[] = []) => {
       if (!active) return;
       // Sessions each remember a folder but the engine holds one; re-assert it
       // so a run always uses the folder the header is showing.
@@ -316,7 +316,14 @@ export default function App() {
       setRunStartedAt(Date.now());
       setLiveTokens(0);
       try {
-        await api.run(text, model || undefined, numCtx ?? undefined, effort, history);
+        await api.run(
+          text,
+          model || undefined,
+          numCtx ?? undefined,
+          effort,
+          history,
+          files.map((f) => f.path),
+        );
       } catch (e) {
         append(id, { kind: "notice", text: String(e), tone: "error" });
       } finally {
@@ -333,11 +340,13 @@ export default function App() {
     async (text: string) => {
       if (!active) return;
       const id = active.id;
-      // Tell the model where the attached files are, in the message rather
-      // than the system prompt — the prompt has to stay byte-stable for the
-      // daemon to reuse its KV cache.
-      const withFiles = attachments.length
-        ? `${text}\n\nAttached files:\n${attachments
+      const sent = attachments;
+      // Images travel in the message itself and need no introduction. The rest
+      // are named in the message rather than the system prompt — the prompt has
+      // to stay byte-stable for the daemon to reuse its KV cache.
+      const opened = sent.filter((a) => a.tool !== "view_image");
+      const withFiles = opened.length
+        ? `${text}\n\nAttached files:\n${opened
             .map((a) => `- ${a.path} (open with ${a.tool})`)
             .join("\n")}`
         : text;
@@ -345,10 +354,17 @@ export default function App() {
       patch(id, (s) => ({
         ...s,
         title: s.entries.length === 0 ? titleFrom(text) : s.title,
-        entries: [...s.entries, { kind: "user", text, at: Date.now() }],
+        entries: [
+          ...s.entries,
+          { kind: "user", text, at: Date.now(), attachments: sent },
+        ],
       }));
+      // The tray empties as the message leaves: what was attached belongs to
+      // that turn now, and the next one starts clean. The staged copies stay
+      // on disk for the session, so retrying the turn still has them.
+      setAttachments([]);
       // Built before the new turn is appended, so it is what came before.
-      await run(id, withFiles, historyFrom(active.entries));
+      await run(id, withFiles, historyFrom(active.entries), sent);
     },
     [active, patch, run, attachments],
   );
@@ -362,7 +378,13 @@ export default function App() {
       if (entry?.kind !== "user") return;
 
       patch(id, (s) => ({ ...s, entries: s.entries.slice(0, index + 1) }));
-      await run(id, entry.text, historyFrom(active.entries.slice(0, index)));
+      // Whatever was attached to that turn goes with it again.
+      await run(
+        id,
+        entry.text,
+        historyFrom(active.entries.slice(0, index)),
+        entry.attachments ?? [],
+      );
     },
     [active, running, patch, run],
   );

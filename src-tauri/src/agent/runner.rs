@@ -138,6 +138,13 @@ pub struct RunConfig {
     /// Sent between the system prompt and the instruction, so the system
     /// prefix stays byte-stable and the daemon keeps reusing its KV cache.
     pub history: Vec<Turn>,
+    /// Base64 images attached to this turn, carried on the instruction itself.
+    pub images: Vec<String>,
+    /// Whether to offer tools at all.
+    ///
+    /// Several vision models cannot call them, and Ollama refuses a request
+    /// that offers tools to a model without the capability.
+    pub tools_enabled: bool,
 }
 
 impl Default for RunConfig {
@@ -153,6 +160,8 @@ impl Default for RunConfig {
             loop_threshold: 3,
             params_billions: None,
             history: Vec::new(),
+            images: Vec::new(),
+            tools_enabled: true,
         }
     }
 }
@@ -205,7 +214,11 @@ impl AgentRunner {
 
         let tier = PromptTier::for_params(self.config.params_billions);
         // Trim to what this model can choose between, then shorten what is left.
-        let schemas = compact_tools(&select_tools(&tools.schemas(), tier), tier);
+        let schemas = if self.config.tools_enabled {
+            compact_tools(&select_tools(&tools.schemas(), tier), tier)
+        } else {
+            Vec::new()
+        };
         let known: Vec<String> = schemas.iter().map(|t| t.function.name.clone()).collect();
 
         tools.set_progress(progress_tx);
@@ -213,7 +226,11 @@ impl AgentRunner {
         let workspace = self.perms.workspace().display().to_string();
         let mut messages = vec![Message::system(system_prompt(tier, &workspace, &schemas))];
         messages.extend(self.config.history.iter().map(Turn::to_message));
-        messages.push(Message::user(user_message));
+        let mut instruction = Message::user(user_message);
+        if !self.config.images.is_empty() {
+            instruction.images = Some(self.config.images.clone());
+        }
+        messages.push(instruction);
         // Which message holds the instruction. Trimming removes from in front
         // of it, so the index moves and has to be carried rather than assumed.
         let mut task = messages.len() - 1;
@@ -243,7 +260,9 @@ impl AgentRunner {
                 model: self.config.model.clone(),
                 messages: messages.clone(),
                 stream: true,
-                tools: Some(schemas.clone()),
+                // An empty list is not the same as no list: Ollama rejects a
+                // request that offers tools to a model without the capability.
+                tools: (!schemas.is_empty()).then(|| schemas.clone()),
                 think: self.config.think.then_some(true),
                 format: None,
                 options: Some(Options { num_ctx: self.config.num_ctx, ..Default::default() }),

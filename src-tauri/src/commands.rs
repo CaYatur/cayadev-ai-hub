@@ -198,6 +198,7 @@ pub async fn run_agent(
     num_ctx: Option<u32>,
     effort: Option<Effort>,
     history: Option<Vec<Turn>>,
+    attachments: Option<Vec<String>>,
 ) -> Result<String, String> {
     let workspace = state
         .workspace
@@ -213,9 +214,49 @@ pub async fn run_agent(
     let policy = RoutingPolicy::derive(&profiles);
 
     // An explicit choice wins; otherwise routing picks the coding model.
-    let chosen = model
+    let mut chosen = model
         .or_else(|| policy.get(TaskClass::Coding).map(str::to_string))
         .ok_or("No model available for coding tasks.")?;
+
+    // Images attached to this turn go straight into the message.
+    //
+    // The alternative — telling the model there is a file at a path and hoping
+    // it calls `view_image` — is a decision, and a decision is exactly what
+    // small models get wrong. It also costs a second round trip through the
+    // vision model to answer a question the vision model could have answered
+    // itself. So when the user attaches an image, the run is handed to a model
+    // that can see, with the image in the message.
+    //
+    // Which files go with *this* message is the frontend's to say — they hang
+    // off the turn the user attached them to, so a second question does not
+    // silently re-send the first one's screenshot. Anything not already staged
+    // is ignored: the caller cannot name a path into the vision model that the
+    // user never attached.
+    let staged: Vec<PathBuf> = state.attachments.read().await.clone();
+    let this_turn: Vec<PathBuf> = match &attachments {
+        Some(paths) => {
+            let wanted: Vec<PathBuf> =
+                paths.iter().map(|p| crate::perms::normalize(std::path::Path::new(p))).collect();
+            staged.iter().filter(|p| wanted.contains(p)).cloned().collect()
+        }
+        // No list at all means an older caller; send everything staged.
+        None => staged.clone(),
+    };
+    let images: Vec<String> =
+        this_turn.iter().filter(|p| is_image(p)).filter_map(encode_image).collect();
+
+    if !images.is_empty() {
+        let sees = profiles
+            .iter()
+            .find(|p| p.name == chosen)
+            .map(|p| p.capabilities.vision)
+            .unwrap_or(false);
+        if !sees {
+            if let Some(vision) = policy.get(TaskClass::Vision) {
+                chosen = vision.to_string();
+            }
+        }
+    }
 
     let profile = profiles.iter().find(|p| p.name == chosen);
     let params = profile.and_then(|p| p.params_billions());
@@ -232,6 +273,12 @@ pub async fn run_agent(
     // a model without the capability wastes tokens and confuses the parser.
     let think = effort.wants_thinking()
         && profile.map(|p| p.capabilities.thinking).unwrap_or(false);
+
+    // Several vision models cannot call tools at all — qwen2.5vl:7b advertises
+    // `completion` and `vision` and nothing else — and Ollama refuses a request
+    // that offers tools to one. Cloud models report no capabilities, so they
+    // are given the benefit of the doubt.
+    let tools_enabled = profile.map(|p| p.capabilities.tools).unwrap_or(true);
 
     let classifier = policy.get(TaskClass::Classify).map(str::to_string);
     let assisted = *state.assisted_approval.read().await;
@@ -266,6 +313,8 @@ pub async fn run_agent(
             // transcript, so it decides what is worth replaying — the engine
             // holding its own copy is what leaked attachments between sessions.
             history: history.unwrap_or_default(),
+            images,
+            tools_enabled,
             ..Default::default()
         },
     )
@@ -411,6 +460,26 @@ pub async fn checkpoint_size(state: State<'_, AppState>) -> Result<u64, String> 
 // Attachments
 // ---------------------------------------------------------------------------
 
+/// Base64 an image for a vision model, or skip it.
+///
+/// Skipping is deliberate: an image too large to send, or one that has since
+/// been deleted, must not fail the whole run.
+fn encode_image(path: &PathBuf) -> Option<String> {
+    use base64::Engine as _;
+
+    /// Ollama takes the image inline in the JSON body. Past a few megabytes
+    /// that is a slow request for a picture no model reads at full resolution
+    /// anyway.
+    const MAX_INLINE_BYTES: u64 = 12 * 1024 * 1024;
+
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_INLINE_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// One file the user handed to the agent.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Attachment {
@@ -422,18 +491,65 @@ pub struct Attachment {
     pub bytes: u64,
     /// Which tool will open it, so the UI can say so.
     pub tool: String,
+    /// A small `data:` image, for attachments that have something to show.
+    ///
+    /// Carried in the payload rather than served from disk so the transcript
+    /// can keep showing it after the staged copy is gone, and so the webview
+    /// needs no filesystem access to render it.
+    pub preview: Option<String>,
+}
+
+fn is_image(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+            .as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+    )
 }
 
 fn tool_for(path: &std::path::Path) -> &'static str {
+    if is_image(path) {
+        return "view_image";
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "view_image",
         "pdf" | "docx" | "doc" | "xlsx" | "xls" | "pptx" => "read_document",
         _ => "read_file",
     }
+}
+
+/// Longest edge of a preview, in pixels.
+///
+/// The preview is stored in the session transcript, which lives in
+/// `localStorage` — a handful of full screenshots would exhaust the quota and
+/// cost the user their history. At this size a PNG preview is a few kilobytes.
+const PREVIEW_EDGE: u32 = 320;
+
+/// A small PNG of an image attachment, as a `data:` URL.
+///
+/// Returns `None` for anything that is not an image or cannot be decoded; a
+/// preview is a convenience and must never fail an attachment.
+fn preview_of(path: &std::path::Path) -> Option<String> {
+    use base64::Engine as _;
+
+    if !is_image(path) {
+        return None;
+    }
+    let image = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    let decoded = image.decode().ok()?;
+    let thumb = decoded.thumbnail(PREVIEW_EDGE, PREVIEW_EDGE);
+
+    let mut png = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    ))
 }
 
 /// Where copies are staged.
@@ -496,6 +612,7 @@ pub async fn attach_files(
             name,
             bytes: meta.len(),
             tool: tool_for(&copy).into(),
+            preview: preview_of(&copy),
             path: copy.display().to_string(),
             source: source.display().to_string(),
         });
@@ -555,6 +672,7 @@ pub async fn attach_bytes(
         name: safe,
         bytes,
         tool: tool_for(&target).into(),
+        preview: preview_of(&target),
         path: target.display().to_string(),
         source: "clipboard".into(),
     })

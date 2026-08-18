@@ -47,6 +47,7 @@ regex = "1"
 dirs = "6"
 async-trait = "0.1"
 base64 = "0.22"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

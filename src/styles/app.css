@@ -1839,3 +1839,90 @@
 .status-rate-live {
   color: var(--ok);
 }
+
+/* --------------------------------------------------------- attachments == */
+
+/* Files sit above the message they were sent with, aligned to the same edge. */
+.msg-files {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 6px;
+  max-width: 460px;
+}
+
+.file-thumb {
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--ink-0);
+  overflow: hidden;
+  cursor: zoom-in;
+  line-height: 0;
+}
+
+.file-thumb img {
+  display: block;
+  max-width: 200px;
+  max-height: 160px;
+}
+
+.file-thumb:hover {
+  border-color: var(--primary);
+}
+
+.file-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-medium);
+  font-size: 11.5px;
+}
+
+.file-card-name {
+  color: var(--text-secondary);
+}
+
+.file-card-size {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* A thumbnail is all there is; this is a closer look, not full resolution. */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: rgba(7, 9, 15, 0.82);
+  cursor: zoom-out;
+  animation: unfold 0.12s var(--ease);
+}
+
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-lg);
+  image-rendering: auto;
+}
+
+.attachment-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+
+.attachment-image {
+  padding-left: 4px;
+}

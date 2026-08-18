@@ -130,6 +130,45 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   );
 }
 
+/**
+ * One attached file, shown as what it is.
+ *
+ * An image shows the image. Everything else shows its name and size — which is
+ * the whole point of the size being right: "notes.txt · 4.2 KB" says something,
+ * "notes.txt · 0 MB" says the app is broken.
+ */
+function AttachmentCard({ attachment }: { attachment: Attachment }) {
+  const [big, setBig] = useState(false);
+
+  if (attachment.preview) {
+    return (
+      <>
+        <button
+          className="file-thumb"
+          onClick={() => setBig(true)}
+          title={`${attachment.name} · ${formatBytes(attachment.bytes)}`}
+        >
+          <img src={attachment.preview} alt={attachment.name} />
+        </button>
+        {big && (
+          // The preview is a thumbnail, so this is as large as it gets. Full
+          // resolution would mean holding every screenshot in the transcript.
+          <div className="lightbox" onClick={() => setBig(false)}>
+            <img src={attachment.preview} alt={attachment.name} />
+          </div>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <span className="file-card" title={attachment.path}>
+      <span className="file-card-name">{attachment.name}</span>
+      <span className="file-card-size">{formatBytes(attachment.bytes)}</span>
+    </span>
+  );
+}
+
 /** A user turn, with the actions that apply to it revealed on hover. */
 function UserTurn({
   entry,
@@ -159,6 +198,13 @@ function UserTurn({
 
   return (
     <div className="userwrap">
+      {entry.attachments && entry.attachments.length > 0 && (
+        <div className="msg-files">
+          {entry.attachments.map((a) => (
+            <AttachmentCard key={a.path} attachment={a} />
+          ))}
+        </div>
+      )}
       <div className="bubble">{entry.text}</div>
       <div className="msg-actions">
         <button className="msg-action" title={t("chat.copy")} onClick={copy}>
@@ -537,7 +583,12 @@ export default function Chat({
         {attachments.length > 0 && (
           <div className="attachments">
             {attachments.map((a) => (
-              <span key={a.path} className="attachment" title={`${a.path} · ${a.tool}`}>
+              <span
+                key={a.path}
+                className={a.preview ? "attachment attachment-image" : "attachment"}
+                title={`${a.path} · ${a.tool}`}
+              >
+                {a.preview && <img className="attachment-thumb" src={a.preview} alt="" />}
                 <span className="attachment-name">{a.name}</span>
                 <span className="attachment-size">{formatBytes(a.bytes)}</span>
                 <button

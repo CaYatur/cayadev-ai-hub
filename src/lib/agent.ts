@@ -113,7 +113,9 @@ export const api = {
     numCtx?: number,
     effort?: Effort,
     history?: Turn[],
-  ) => invoke<string>("run_agent", { prompt, model, numCtx, effort, history }),
+    attachments?: string[],
+  ) =>
+    invoke<string>("run_agent", { prompt, model, numCtx, effort, history, attachments }),
   contextOptions: (model: string) => invoke<ContextOptions>("context_options", { model }),
   checkpointList: () => invoke<Checkpoint[]>("checkpoint_list"),
   checkpointRestore: (id: string) => invoke<string[]>("checkpoint_restore", { id }),
@@ -146,6 +148,13 @@ export type Attachment = {
   bytes: number;
   /** Which tool will open it, so the UI can say so. */
   tool: string;
+  /**
+   * A small `data:` image for attachments that have something to show.
+   *
+   * Carried in the payload rather than read back off disk, so the transcript
+   * keeps showing it without the webview needing filesystem access.
+   */
+  preview: string | null;
 };
 
 /**

@@ -602,3 +602,109 @@ Created `notes.txt`."),
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A model that can see but cannot call tools. The routing swap in `run_agent`
+/// picks one of these when an image is attached to a coding model.
+const SEEING: &str = "qwen2.5vl:7b";
+
+/// A PNG of one flat colour, base64'd the way `run_agent` sends it.
+fn solid_png(width: u32, height: u32, rgb: [u8; 3]) -> String {
+    use base64::Engine as _;
+
+    let buffer = image::RgbImage::from_fn(width, height, |_, _| image::Rgb(rgb));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode png");
+    base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+}
+
+/// Drive a run that carries an image, with tools turned off.
+async fn run_agent_with_image(
+    model: &str,
+    workspace: &PathBuf,
+    prompt: &str,
+    images: Vec<String>,
+) -> (StopReason, Transcript) {
+    let mut tools = WorkspaceTools::new(workspace);
+    let perms = PermissionEngine::new(workspace, PermissionMode::ProjectAuto);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: model.into(),
+            max_steps: 4,
+            num_ctx: Some(8192),
+            params_billions: Some(7.0),
+            images,
+            // What `run_agent` does for a model whose capability list is
+            // `completion, vision` and nothing else.
+            tools_enabled: false,
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let log = Arc::new(Mutex::new(Transcript::default()));
+    let sink = log.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let mut t = sink.lock().unwrap();
+            match ev {
+                AgentEvent::Token { text } => t.text.push_str(&text),
+                AgentEvent::ToolProposed { call } => t.tools_called.push(call.name.clone()),
+                AgentEvent::StepDone { metrics, .. } => {
+                    t.steps += 1;
+                    t.decode_tps.push(metrics.decode_tps);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let reason = runner.run(prompt, &mut tools, &AutoApprove, tx).await;
+    let _ = collector.await;
+    let transcript = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
+    (reason, transcript)
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn an_attached_image_is_seen_without_a_tool_call() {
+    // The point of routing straight to a vision model: the picture is in the
+    // message, so answering does not depend on the model deciding to call
+    // `view_image` — which is the decision small models get wrong.
+    let dir = scratch("vision");
+
+    let (reason, t) = run_agent_with_image(
+        SEEING,
+        &dir,
+        "What colour is this image? Answer with one word.",
+        vec![solid_png(160, 160, [220, 38, 38])],
+    )
+    .await;
+
+    report("vision/colour", &reason, &t);
+    let said = t.text.to_lowercase();
+    assert!(
+        said.contains("red") || said.contains("kırmızı") || said.contains("crimson"),
+        "the image did not reach the model: {}",
+        t.text
+    );
+    assert!(t.tools_called.is_empty(), "a tool was offered to a model without them");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn a_run_without_tools_still_completes() {
+    // Ollama rejects a request that offers tools to a model that has none, so
+    // the request must carry no `tools` field at all rather than an empty list.
+    let dir = scratch("no-tools");
+    let (reason, t) =
+        run_agent_with_image(SEEING, &dir, "Say the word ready.", Vec::new()).await;
+
+    report("vision/no-tools", &reason, &t);
+    assert_eq!(reason, StopReason::Completed, "said: {}", t.text);
+    std::fs::remove_dir_all(&dir).ok();
+}

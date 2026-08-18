@@ -1,9 +1,12 @@
-import type { Metrics, Outcome, ProposedCall, Recovery } from "./agent";
+import type { Attachment, Metrics, Outcome, ProposedCall, Recovery } from "./agent";
 
 /// One line in a conversation. Tool calls are entries, not annotations on a
 /// message, because the user needs to scan and expand them independently.
 export type Entry =
-  | { kind: "user"; text: string; at?: number }
+  /// Files hang off the turn they were sent with, not off the composer: the
+  /// message that carried a screenshot should still show it a week later, and
+  /// the next message should not silently carry it again.
+  | { kind: "user"; text: string; at?: number; attachments?: Attachment[] }
   | { kind: "assistant"; text: string }
   /// Reasoning from a thinking-capable model. Kept separate from the
   /// answer so it can be folded away — it is usually much longer than
@@ -175,9 +178,7 @@ const MAX_TURN_CHARS = 1500;
 function clamp(text: string): string {
   if (text.length <= MAX_TURN_CHARS) return text;
   const half = Math.floor(MAX_TURN_CHARS / 2);
-  return `${text.slice(0, half)}
-…
-${text.slice(-half)}`;
+  return `${text.slice(0, half)}\n…\n${text.slice(-half)}`;
 }
 
 /// Flatten a transcript into the exchanges worth replaying to the model.
@@ -194,8 +195,7 @@ export function historyFrom(entries: Entry[]): Turn[] {
 
   const intoAssistant = (text: string) => {
     const last = turns[turns.length - 1];
-    if (last?.role === "assistant") last.text = `${last.text}
-${text}`.trim();
+    if (last?.role === "assistant") last.text = `${last.text}\n${text}`.trim();
     else turns.push({ role: "assistant", text });
   };
 
