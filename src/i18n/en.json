@@ -41,7 +41,8 @@
     "placeholderBusy": "Write the next instruction while this one runs…",
     "words": "words",
     "detach": "Remove",
-    "dropHint": "Drop files to attach them"
+    "dropHint": "Drop files to attach them",
+    "pasted": "pasted image"
   },
   "approval": {
     "title": "Approve {{tool}}?",

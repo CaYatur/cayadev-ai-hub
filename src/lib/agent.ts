@@ -114,6 +114,8 @@ export const api = {
   checkpointSize: () => invoke<number>("checkpoint_size"),
   attachFiles: (paths: string[]) => invoke<Attachment[]>("attach_files", { paths }),
   clearAttachments: () => invoke<void>("clear_attachments"),
+  attachBytes: (name: string, data: number[]) =>
+    invoke<Attachment>("attach_bytes", { name, data }),
 };
 
 /** Subscribe to run events and approval questions. */

@@ -510,3 +510,46 @@ pub async fn clear_attachments(state: State<'_, AppState>) -> Result<(), String>
     roots.clear();
     Ok(())
 }
+
+/// Stage raw bytes as an attachment — used for images pasted from the clipboard.
+///
+/// A pasted image has no path, so the frontend hands over the bytes and this
+/// gives them one. Same staging directory and same per-file root registration
+/// as a dropped file, so nothing downstream has to know the difference.
+#[tauri::command]
+pub async fn attach_bytes(
+    state: State<'_, AppState>,
+    name: String,
+    data: Vec<u8>,
+) -> Result<Attachment, String> {
+    const MAX_PASTE_BYTES: usize = 32 * 1024 * 1024;
+    if data.len() > MAX_PASTE_BYTES {
+        return Err(format!(
+            "pasted content is {} MB; the limit is {} MB",
+            data.len() / 1024 / 1024,
+            MAX_PASTE_BYTES / 1024 / 1024
+        ));
+    }
+
+    // Take only the file name: a crafted name must not write outside staging.
+    let safe = std::path::Path::new(&name)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "pasted.png".into());
+
+    let slot = attachment_dir()?.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&slot).map_err(|e| e.to_string())?;
+    let target = slot.join(&safe);
+    let bytes = data.len() as u64;
+    std::fs::write(&target, data).map_err(|e| format!("cannot stage {safe}: {e}"))?;
+
+    state.attachments.write().await.push(target.clone());
+    Ok(Attachment {
+        name: safe,
+        bytes,
+        tool: tool_for(&target).into(),
+        path: target.display().to_string(),
+        source: "clipboard".into(),
+    })
+}

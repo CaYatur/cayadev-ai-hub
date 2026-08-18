@@ -41,7 +41,8 @@
     "placeholderBusy": "Bu çalışırken sıradaki komutu yazabilirsiniz…",
     "words": "kelime",
     "detach": "Kaldır",
-    "dropHint": "Eklemek için dosyaları bırakın"
+    "dropHint": "Eklemek için dosyaları bırakın",
+    "pasted": "yapıştırılan görsel"
   },
   "approval": {
     "title": "{{tool}} onaylansın mı?",

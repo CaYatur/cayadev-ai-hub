@@ -53,6 +53,10 @@ export default function App() {
   const [numCtx, setNumCtx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dropping, setDropping] = useState(false);
+  // Metrics only arrive when a step finishes, so a long step left the
+  // status line frozen. These are counted client-side as tokens stream.
+  const [liveTokens, setLiveTokens] = useState(0);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
 
   // The event stream is global, so handlers need the current session id without
   // resubscribing on every switch.
@@ -108,6 +112,10 @@ export default function App() {
 
         switch (event.kind) {
           case "token":
+            // Rough, and deliberately so: an exact count needs the model's
+            // tokenizer and a round-trip. ~3.6 chars/token is close enough for
+            // a number that changes several times a second.
+            setLiveTokens((n) => n + Math.max(1, Math.round(event.text.length / 3.6)));
             patch(id, (s) => {
               const entries = [...s.entries];
               const last = entries[entries.length - 1];
@@ -219,6 +227,22 @@ export default function App() {
     [append],
   );
 
+  /// Stage an image pasted from the clipboard, which has no path of its own.
+  const attachPasted = useCallback(
+    async (file: File) => {
+      const id = activeRef.current;
+      try {
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        const extension = file.type.split("/")[1] || "png";
+        const added = await api.attachBytes(file.name || `pasted.${extension}`, bytes);
+        setAttachments((prev) => [...prev, added]);
+      } catch (e) {
+        if (id) append(id, { kind: "notice", text: String(e), tone: "error" });
+      }
+    },
+    [append],
+  );
+
   const detach = useCallback(async (path: string) => {
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   }, []);
@@ -273,12 +297,16 @@ export default function App() {
         }
       }
       setRunning(true);
+      setRunStartedAt(Date.now());
+      setLiveTokens(0);
       try {
         await api.run(text, model || undefined, numCtx ?? undefined, effort);
       } catch (e) {
         append(id, { kind: "notice", text: String(e), tone: "error" });
       } finally {
         setRunning(false);
+        setRunStartedAt(null);
+        setLiveTokens(0);
         setPending(null);
       }
     },
@@ -438,6 +466,9 @@ export default function App() {
             onEffort={setEffort}
             onNumCtx={setNumCtx}
             attachments={attachments}
+            liveTokens={liveTokens}
+            runStartedAt={runStartedAt}
+            onPaste={attachPasted}
             dropping={dropping}
             onDetach={detach}
             onRetry={retry}

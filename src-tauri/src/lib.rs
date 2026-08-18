@@ -41,6 +41,7 @@ pub fn run() {
             commands::checkpoint_restore,
             commands::checkpoint_size,
             commands::attach_files,
+            commands::attach_bytes,
             commands::clear_attachments,
         ])
         .run(tauri::generate_context!())

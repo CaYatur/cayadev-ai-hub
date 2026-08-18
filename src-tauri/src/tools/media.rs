@@ -40,6 +40,9 @@ const SIDECAR_DOCS: &[&str] = &["pdf", "docx", "doc", "xlsx", "xls", "pptx", "od
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
+const AUDIO_EXTS: &[&str] = &["mp3", "wav", "m4a", "ogg", "flac", "aac", "wma", "opus"];
+const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "wmv", "flv"];
+
 pub struct MediaTools {
     workspace: PathBuf,
     client: OllamaClient,
@@ -47,6 +50,10 @@ pub struct MediaTools {
     vision_model: Option<String>,
     /// Interpreter for document extraction. `None` disables those tools.
     python: Option<String>,
+    /// Interpreter with faster-whisper, for transcription.
+    transcriber: Option<String>,
+    /// ffmpeg and ffprobe, for video.
+    ffmpeg_available: bool,
     adb_available: bool,
 }
 
@@ -61,6 +68,8 @@ impl MediaTools {
             client,
             vision_model,
             python: detect_python(),
+            transcriber: detect_transcriber(),
+            ffmpeg_available: which("ffmpeg") && which("ffprobe"),
             adb_available: which("adb"),
         }
     }
@@ -81,6 +90,20 @@ impl MediaTools {
             self.workspace.join(candidate)
         };
         crate::perms::normalize(&joined)
+    }
+
+    /// Locate a sidecar script, in the source tree or beside the executable.
+    fn sidecar(&self, name: &str) -> PathBuf {
+        let local = self.workspace.join("scripts").join(name);
+        if local.exists() {
+            return local;
+        }
+        // Installed builds keep the sidecar next to the executable.
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("scripts").join(name)))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| PathBuf::from("scripts").join(name))
     }
 
     /// Ask the vision model to describe an image, returning text.
@@ -175,6 +198,36 @@ impl MediaTools {
             ));
         }
 
+        if self.transcriber.is_some() {
+            tools.push(Tool::function(
+                "transcribe",
+                "Transcribe speech from an audio or video file.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the media file"},
+                        "language": {"type": "string", "description": "Language code, e.g. tr. Detected if omitted"}
+                    },
+                    "required": ["path"]
+                }),
+            ));
+        }
+
+        if self.ffmpeg_available && self.vision_model.is_some() {
+            tools.push(Tool::function(
+                "watch_video",
+                "Look at a video and answer a question about what happens in it.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the video"},
+                        "question": {"type": "string", "description": "What to look for"}
+                    },
+                    "required": ["path"]
+                }),
+            ));
+        }
+
         if self.adb_available {
             tools.push(Tool::function(
                 "adb",
@@ -198,7 +251,7 @@ impl MediaTools {
 
     pub fn action_for(&self, name: &str, args: &Map<String, Value>) -> Option<Action> {
         match name {
-            "read_document" | "view_image" => Some(Action::ReadFile {
+            "read_document" | "view_image" | "transcribe" | "watch_video" => Some(Action::ReadFile {
                 path: self.resolve(&Self::arg(args, "path")?),
             }),
             "screenshot" => Some(Action::CaptureScreen { what: "this screen".into() }),
@@ -229,6 +282,14 @@ impl MediaTools {
                 if IMAGE_EXTS.contains(&ext.as_str()) {
                     return Err(format!("{raw} is an image. Use view_image instead."));
                 }
+                if AUDIO_EXTS.contains(&ext.as_str()) {
+                    return Err(format!("{raw} is audio. Use transcribe instead."));
+                }
+                if VIDEO_EXTS.contains(&ext.as_str()) {
+                    return Err(format!(
+                        "{raw} is a video. Use watch_video, or transcribe for its speech."
+                    ));
+                }
                 if NATIVE_TEXT.contains(&ext.as_str()) || ext.is_empty() {
                     let text = std::fs::read_to_string(&path)
                         .map_err(|e| format!("cannot read {raw}: {e}"))?;
@@ -242,21 +303,84 @@ impl MediaTools {
                     "extracting this format needs Python with pymupdf, python-docx, and openpyxl. \
                      See the README.",
                 )?;
-                let script = self.workspace.join("scripts").join("extract.py");
-                let script = if script.exists() {
-                    script
-                } else {
-                    // Installed builds keep the sidecar next to the executable.
-                    std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(|d| d.join("scripts").join("extract.py")))
-                        .unwrap_or(script)
-                };
+                let script = self.sidecar("extract.py");
 
                 let out = self
                     .run(&python, &[script.to_string_lossy().to_string(), path.to_string_lossy().to_string()])
                     .await?;
                 Ok(out.chars().take(MAX_TEXT).collect())
+            }
+
+            "transcribe" => {
+                let raw = Self::required(args, "path")?;
+                let path = self.resolve(&raw);
+                let python = self
+                    .transcriber
+                    .clone()
+                    .ok_or("transcription needs Python with faster-whisper. See the README.")?;
+
+                let mut argv = vec![
+                    self.sidecar("media.py").to_string_lossy().to_string(),
+                    "transcribe".into(),
+                    path.to_string_lossy().to_string(),
+                ];
+                if let Some(language) = Self::arg(args, "language") {
+                    argv.push(language);
+                }
+                let out = self.run(&python, &argv).await?;
+                Ok(out.chars().take(MAX_TEXT).collect())
+            }
+
+            "watch_video" => {
+                let raw = Self::required(args, "path")?;
+                let path = self.resolve(&raw);
+                let question = Self::arg(args, "question")
+                    .unwrap_or_else(|| "Describe what is happening.".into());
+                let python = self
+                    .python
+                    .clone()
+                    .or_else(|| self.transcriber.clone())
+                    .ok_or("video needs Python. See the README.")?;
+
+                let out = self
+                    .run(
+                        &python,
+                        &[
+                            self.sidecar("media.py").to_string_lossy().to_string(),
+                            "video".into(),
+                            path.to_string_lossy().to_string(),
+                        ],
+                    )
+                    .await?;
+
+                let parsed: serde_json::Value =
+                    serde_json::from_str(out.lines().last().unwrap_or_default())
+                        .map_err(|e| format!("could not read frame data: {e}"))?;
+
+                let summary = parsed
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+
+                // Each frame is described separately and the answers stitched
+                // together. Sending one frame at a time keeps this working with
+                // any vision model rather than needing one that accepts video.
+                let mut described = vec![summary];
+                if let Some(frames) = parsed.get("frames").and_then(Value::as_array) {
+                    for frame in frames {
+                        let Some(frame_path) = frame.get("path").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let at = frame.get("at").and_then(Value::as_f64).unwrap_or(0.0);
+                        match self.describe_image(Path::new(frame_path), &question).await {
+                            Ok(text) => described.push(format!("[{at:.1}s] {text}")),
+                            Err(e) => described.push(format!("[{at:.1}s] could not read frame: {e}")),
+                        }
+                        let _ = std::fs::remove_file(frame_path);
+                    }
+                }
+                Ok(described.join("\n\n").chars().take(MAX_TEXT).collect())
             }
 
             "view_image" => {
@@ -384,6 +508,26 @@ fn which(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Find a Python that can transcribe.
+///
+/// Checked separately from the document interpreter because the two need different
+/// packages, and a machine may well have one and not the other.
+fn detect_transcriber() -> Option<String> {
+    for candidate in ["python", "python3"] {
+        let ok = std::process::Command::new(candidate)
+            .args(["-c", "import faster_whisper"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
 /// Find a Python that has the extraction libraries installed.
 ///
 /// Checking for the libraries rather than just the interpreter is the point: a
@@ -454,6 +598,22 @@ mod tests {
                 "{name} has no Action and would bypass the permission engine"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn audio_and_video_are_redirected_from_read_document() {
+        let t = tools(Some("qwen3-vl:8b"));
+        let audio = t
+            .execute("read_document", &args(json!({"path": "talk.mp3"})))
+            .await
+            .unwrap_err();
+        assert!(audio.contains("transcribe"), "got: {audio}");
+
+        let video = t
+            .execute("read_document", &args(json!({"path": "clip.mp4"})))
+            .await
+            .unwrap_err();
+        assert!(video.contains("watch_video"), "got: {video}");
     }
 
     #[test]

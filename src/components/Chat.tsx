@@ -214,6 +214,9 @@ export default function Chat({
   numCtx,
   attachments,
   dropping,
+  liveTokens,
+  runStartedAt,
+  onPaste,
   onDetach,
   onSend,
   onAnswer,
@@ -242,6 +245,11 @@ export default function Chat({
   numCtx: number | null;
   attachments: Attachment[];
   dropping: boolean;
+  /// Counted client-side while tokens stream, so the status line moves
+  /// during a step instead of only between them.
+  liveTokens: number;
+  runStartedAt: number | null;
+  onPaste: (file: File) => void;
   onDetach: (path: string) => void;
   onSend: (text: string) => void;
   onAnswer: (approved: boolean) => void;
@@ -261,7 +269,20 @@ export default function Chat({
   const [prompt, setPrompt] = useState("");
   const [menu, setMenu] = useState<"mode" | "model" | "effort" | "ctx" | null>(null);
   const [ctxOptions, setCtxOptions] = useState<ContextOptions | null>(null);
+  const [tick, setTick] = useState(0);
   const bottom = useRef<HTMLDivElement>(null);
+
+  // A clock that only advances between steps is not a clock.
+  useEffect(() => {
+    if (runStartedAt === null) return;
+    const timer = window.setInterval(() => setTick((n) => n + 1), 500);
+    return () => window.clearInterval(timer);
+  }, [runStartedAt]);
+
+  const elapsedMs =
+    session.elapsedMs + (runStartedAt !== null ? Date.now() - runStartedAt : 0);
+  const totalTokens = session.tokens + liveTokens;
+  void tick;
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: "smooth" });
@@ -463,6 +484,14 @@ export default function Chat({
                 send();
               }
             }}
+            onPaste={(e) => {
+              // A pasted image arrives as a clipboard file with no path, so it
+              // is staged by bytes rather than by name.
+              const files = Array.from(e.clipboardData.files);
+              if (files.length === 0) return;
+              e.preventDefault();
+              files.forEach(onPaste);
+            }}
             // Deliberately not disabled while a run is in flight: composing the
             // next instruction is the natural thing to do while waiting, and a
             // dead text box for a minute is the wrong answer. Only sending is
@@ -639,9 +668,9 @@ export default function Chat({
 
         <div className="statusline">
           <span className="status-mark" aria-hidden="true">◷</span>
-          <span>{formatElapsed(session.elapsedMs)}</span>
+          <span>{formatElapsed(elapsedMs)}</span>
           <span className="sep">·</span>
-          <span>{formatTokens(session.tokens)} {t("chat.used")}</span>
+          <span>{formatTokens(totalTokens)} {t("chat.used")}</span>
           {session.lastRate !== null && (
             <>
               <span className="sep">·</span>
