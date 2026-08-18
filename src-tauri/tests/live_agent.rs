@@ -293,6 +293,65 @@ async fn small_models_survive_the_full_tool_surface() {
 
 #[tokio::test]
 #[ignore = "requires a running Ollama daemon"]
+async fn the_routed_model_still_works_with_the_full_surface() {
+    // The 7B is what routing actually picks, and Compact tier keeps 12 of the
+    // 23 schemas. This confirms the trim leaves it able to finish a task —
+    // counting tools proves nothing about whether it can still choose.
+    let dir = scratch("surface7b");
+    std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status().ok();
+    std::fs::write(dir.join("config.txt"), "timeout = 30
+").unwrap();
+
+    let tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    println!("
+[7b-surface] {} tools before trimming", tools.schemas().len());
+
+    let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: CODER.into(),
+            max_steps: 6,
+            num_ctx: Some(8192),
+            params_billions: Some(7.0),
+            ..Default::default()
+        },
+    );
+
+    let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+    let called = Arc::new(Mutex::new(Vec::<String>::new()));
+    let text = Arc::new(Mutex::new(String::new()));
+    let (cs, ts) = (called.clone(), text.clone());
+    let drain = tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::ToolProposed { call } => cs.lock().unwrap().push(call.name),
+                AgentEvent::Token { text } => ts.lock().unwrap().push_str(&text),
+                _ => {}
+            }
+        }
+    });
+
+    let reason = runner
+        .run("Read config.txt and tell me the timeout value.", &tools, &AutoApprove, tx)
+        .await;
+    let _ = drain.await;
+
+    let tools_used = called.lock().unwrap().clone();
+    let said = text.lock().unwrap().clone();
+    println!("[7b-surface] {reason:?}, tools: {tools_used:?}");
+    println!("[7b-surface] said: {}", said.chars().take(160).collect::<String>().replace('\n', " "));
+
+    assert_eq!(reason, StopReason::Completed, "the trim broke the routed model");
+    assert!(tools_used.iter().any(|n| n == "read_file"), "never read the file");
+    assert!(said.contains("30"), "answer did not include the value: {said}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
 async fn a_rejected_call_does_not_end_the_session() {
     // Rejection must be reported to the model as a normal result, not crash the
     // loop. Read-only mode escalates the read, and the gate refuses it.

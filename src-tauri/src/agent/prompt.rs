@@ -57,9 +57,14 @@ impl PromptTier {
     /// How many tool schemas this tier can hold before choosing badly.
     ///
     /// A model does not fail loudly when given too many tools — it starts
-    /// picking the wrong one, or inventing names. The app can advertise 21
-    /// (files, GitHub, documents, images, devices, web), which is far past what
-    /// a 0.5B model can choose between.
+    /// picking the wrong one, or inventing names. The full surface is 23
+    /// schemas (files, GitHub, documents, images, devices, web), far past what
+    /// a 0.5B can choose between.
+    ///
+    /// These numbers are judgement, not measurement: 12 was chosen to hold the
+    /// core tools plus one capability from each family. The live tests confirm
+    /// a 7B still finishes a task at 12 and a 0.5B still produces usable calls
+    /// at 5; where either actually degrades has not been measured.
     pub fn tool_budget(&self) -> usize {
         match self {
             Self::Minimal => 5,
@@ -69,10 +74,10 @@ impl PromptTier {
     }
 }
 
-/// Tools every tier keeps, in the order they matter.
+/// Tools every tier keeps.
 ///
-/// These are the ones a coding task cannot proceed without, so they are never
-/// dropped to make room for anything else.
+/// A coding task cannot proceed without these, so they are never dropped to
+/// make room for anything else.
 const CORE_TOOLS: &[&str] = &[
     "read_file",
     "edit_file",
@@ -81,12 +86,36 @@ const CORE_TOOLS: &[&str] = &[
     "run_command",
 ];
 
+/// What fills the remaining budget, best first.
+///
+/// This list exists because the obvious implementation — keep the core tools,
+/// then take whatever comes next — silently deleted a whole capability. The
+/// surface is assembled files → GitHub → media → web, and GitHub alone is
+/// twelve schemas, so "whatever comes next" was twelve GitHub tools and a 7B
+/// model never saw `web_search`, `read_document`, or even `gh_open_pr`.
+///
+/// Ordering by usefulness in code keeps that decision visible, instead of
+/// leaving it to the order the surface happens to be built in.
+const PRIORITY_TOOLS: &[&str] = &[
+    // Research, and the most common reason to reach outside the project.
+    "web_search",
+    "web_read",
+    // Attachments the user drops into a task.
+    "read_document",
+    // The GitHub tools that carry the most work per call.
+    "gh_status",
+    "gh_diff",
+    "gh_open_pr",
+    "gh_commit",
+    "view_image",
+];
+
 /// Trim the tool list to what the model can actually choose between.
 ///
-/// Core file tools are kept first, then everything else in the order given,
-/// until the tier's budget is reached. Dropping a tool is better than keeping
-/// it and having the model pick it by mistake — and a tool the model never
-/// needed still costs prefill on every single step.
+/// Core tools first, then [`PRIORITY_TOOLS`], then the remainder in the order
+/// given. Dropping a tool is better than keeping it and having the model pick
+/// it by mistake — and a tool the model never needed still costs prefill on
+/// every single step.
 pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
     let budget = tier.tool_budget();
     if tools.len() <= budget {
@@ -94,13 +123,19 @@ pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
     }
 
     let mut chosen: Vec<Tool> = Vec::with_capacity(budget);
+    let take = |name: &str, chosen: &mut Vec<Tool>| {
+        if chosen.len() < budget && !chosen.iter().any(|c| c.function.name == name) {
+            if let Some(tool) = tools.iter().find(|t| t.function.name == name) {
+                chosen.push(tool.clone());
+            }
+        }
+    };
+
     for name in CORE_TOOLS {
-        if chosen.len() >= budget {
-            break;
-        }
-        if let Some(tool) = tools.iter().find(|t| t.function.name == *name) {
-            chosen.push(tool.clone());
-        }
+        take(name, &mut chosen);
+    }
+    for name in PRIORITY_TOOLS {
+        take(name, &mut chosen);
     }
     for tool in tools {
         if chosen.len() >= budget {

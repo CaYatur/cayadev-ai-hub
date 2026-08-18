@@ -662,6 +662,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The surface `run_agent` builds, not the hand-made one the other tests use.
+    fn real_surface(dir: &Path) -> WorkspaceTools {
+        // GitHub tools only appear inside a repository.
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        WorkspaceTools::new(dir).with_media(
+            crate::ollama::OllamaClient::new(
+                crate::ollama::DEFAULT_HOST,
+                crate::ollama::Timeouts::default(),
+            ),
+            Some("qwen3-vl:8b".into()),
+        )
+    }
+
+    #[test]
+    fn trimming_keeps_a_capability_from_each_family() {
+        // The bug this guards: the surface is assembled files -> GitHub -> media
+        // -> web, and GitHub alone is twelve schemas. Filling the budget in
+        // assembly order handed a 7B five file tools and seven GitHub tools,
+        // silently deleting web search, documents, images, and gh_open_pr.
+        use crate::agent::prompt::{select_tools, PromptTier};
+
+        let dir = scratch();
+        let tools = real_surface(&dir);
+        let all = tools.schemas();
+        assert!(all.len() > 20, "expected the full surface, got {}", all.len());
+
+        let compact = select_tools(&all, PromptTier::Compact);
+        let names: Vec<&str> = compact.iter().map(|t| t.function.name.as_str()).collect();
+
+        for expected in ["read_file", "run_command", "web_search", "read_document", "gh_open_pr"] {
+            assert!(
+                names.contains(&expected),
+                "Compact tier dropped {expected}; got {names:?}"
+            );
+        }
+
+        // The smallest tier keeps only what a task cannot proceed without.
+        let minimal = select_tools(&all, PromptTier::Minimal);
+        let minimal_names: Vec<&str> =
+            minimal.iter().map(|t| t.function.name.as_str()).collect();
+        assert!(minimal_names.contains(&"read_file"));
+        assert!(!minimal_names.iter().any(|n| n.starts_with("gh_")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn missing_arguments_are_reported_not_panicked_on() {
         let dir = scratch();
