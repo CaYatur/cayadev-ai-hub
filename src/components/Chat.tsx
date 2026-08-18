@@ -34,9 +34,15 @@ const EFFORTS: Effort[] = ["fast", "balanced", "thorough"];
 /** A tool call, collapsed to one scannable line until the user opens it. */
 function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
   const note = RECOVERY_NOTE[entry.call.recovery];
   const state = entry.settled ?? "waiting";
+  // A command that is still running and already producing output opens itself:
+  // streaming it and then hiding it would defeat the point.
+  const streaming = !entry.settled && Boolean(entry.output);
+  const [manual, setManual] = useState<boolean | null>(null);
+  const open = manual ?? streaming;
+  const setOpen = (next: boolean | ((v: boolean) => boolean)) =>
+    setManual(typeof next === "function" ? next(open) : next);
 
   return (
     <div className={`toolrow toolrow-${state}`}>

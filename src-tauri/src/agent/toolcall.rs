@@ -327,6 +327,22 @@ fn call_from_map(obj: &Map<String, Value>, known: &[String]) -> Option<ToolCall>
     })
 }
 
+/// A call-shaped thing whose tool name matches nothing registered.
+///
+/// This is the difference between "the model answered" and "the model tried to
+/// work and got the name wrong". `qwen2.5-coder:0.5b` reliably invents names —
+/// `read_config` for `read_file`, `Create Notes.md` for `write_file` — and
+/// before this the runner read the resulting `None` as a finished answer and
+/// ended the session having done nothing. That is precisely the failure this
+/// project exists to remove, so the name is extracted and handed back for a
+/// correction instead.
+pub fn unknown_tool_name(content: &str) -> Option<String> {
+    // Reuse the extractors with an empty known-list, which disables name
+    // checking, then report the name that came back.
+    let found = extract(content, None, &[])?;
+    found.calls.first().map(|c| c.function.name.clone())
+}
+
 /// Match a model's spelling of a tool name against the canonical one.
 ///
 /// Models re-case and re-punctuate names constantly: `qwen2.5-coder:0.5b`
@@ -680,6 +696,30 @@ mod tests {
         let ex = extract(text, None, &tools()).unwrap();
         assert_eq!(ex.recovery, Recovery::LooseJson);
         assert_eq!(ex.calls[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn an_invented_name_is_reported_rather_than_discarded() {
+        // Real output from qwen2.5-coder:0.5b asked to read config.txt.
+        let text = r#"{"name": "read_config", "arguments": {"path": "config.txt"}}"#;
+        assert!(extract(text, None, &tools()).is_none(), "must not run an unknown tool");
+        assert_eq!(unknown_tool_name(text).as_deref(), Some("read_config"));
+    }
+
+    #[test]
+    fn prose_reports_no_invented_name() {
+        // Only call-shaped output should produce a correction; ordinary text
+        // must still read as an answer.
+        assert_eq!(unknown_tool_name("I think we should read the file first."), None);
+        assert_eq!(unknown_tool_name("The timeout is 30 seconds."), None);
+    }
+
+    #[test]
+    fn a_valid_call_is_not_reported_as_invented() {
+        let text = r#"{"name": "read_file", "arguments": {"path": "a.txt"}}"#;
+        assert_eq!(unknown_tool_name(text).as_deref(), Some("read_file"));
+        // ...but it resolves normally, so the runner never asks.
+        assert!(extract(text, None, &tools()).is_some());
     }
 
     #[test]

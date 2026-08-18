@@ -26,7 +26,7 @@ use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
 use super::prompt::{compact_tools, select_tools, system_prompt, PromptTier};
-use super::toolcall::{extract, Recovery};
+use super::toolcall::{extract, unknown_tool_name, Recovery};
 
 /// Executes tool calls. Implemented by the real tool surface and by test doubles.
 #[async_trait::async_trait]
@@ -41,6 +41,13 @@ pub trait ToolExecutor: Send + Sync {
     /// Run the call. `Err` is a tool-level failure the model should see and react
     /// to, not a transport error.
     async fn execute(&self, name: &str, args: &Map<String, Value>) -> Result<String, String>;
+
+    /// Where a long-running tool sends output before it finishes.
+    ///
+    /// Default is a no-op, so a tool surface that has nothing to stream needs
+    /// no code. `WorkspaceTools` uses it for `run_command`, which otherwise
+    /// says nothing at all for the length of a build.
+    fn set_progress(&mut self, _tx: mpsc::Sender<String>) {}
 }
 
 /// Settles `Ask` decisions. The UI implementation prompts the user; the
@@ -69,6 +76,8 @@ pub enum AgentEvent {
     Thinking { text: String },
     ToolProposed { call: ProposedCall },
     ToolSettled { id: String, outcome: Outcome, output: String },
+    /// Output from a command that is still running.
+    ToolProgress { text: String },
     StepDone { step: usize, metrics: Metrics },
     Done { reason: StopReason },
     Error { message: String },
@@ -145,14 +154,26 @@ impl AgentRunner {
     pub async fn run(
         &self,
         user_message: &str,
-        tools: &dyn ToolExecutor,
+        tools: &mut dyn ToolExecutor,
         gate: &dyn ApprovalGate,
         events: mpsc::Sender<AgentEvent>,
     ) -> StopReason {
+        // Relay command output as it arrives.
+        let (progress_tx, mut progress_rx) = mpsc::channel::<String>(256);
+        let progress_events = events.clone();
+        let progress_pump = tokio::spawn(async move {
+            while let Some(text) = progress_rx.recv().await {
+                let _ = progress_events.send(AgentEvent::ToolProgress { text }).await;
+            }
+        });
+
         let tier = PromptTier::for_params(self.config.params_billions);
         // Trim to what this model can choose between, then shorten what is left.
         let schemas = compact_tools(&select_tools(&tools.schemas(), tier), tier);
         let known: Vec<String> = schemas.iter().map(|t| t.function.name.clone()).collect();
+
+        tools.set_progress(progress_tx);
+        let _ = &progress_pump;
 
         let workspace = self.perms.workspace().display().to_string();
         let mut messages = vec![
@@ -222,7 +243,32 @@ impl AgentRunner {
 
             let Some(found) = extract(&assistant.content, assistant.tool_calls.as_deref(), &known)
             else {
-                // No tool call: the model is answering, so the task is done.
+                // A call-shaped reply naming a tool that does not exist is a
+                // mistake to correct, not an answer. Treating it as an answer
+                // is how a session ends having done nothing.
+                if let Some(invented) = unknown_tool_name(&assistant.content) {
+                    let msg = format!(
+                        "There is no tool called `{invented}`. The tools you can use are: \
+                         {}. Call one of those, or answer without a tool.",
+                        known.join(", ")
+                    );
+                    messages.push(Message {
+                        role: "assistant".into(),
+                        content: assistant.content.clone(),
+                        ..Default::default()
+                    });
+                    messages.push(Message::user(&msg));
+                    let _ = events
+                        .send(AgentEvent::ToolSettled {
+                            id: String::new(),
+                            outcome: Outcome::Failed,
+                            output: msg,
+                        })
+                        .await;
+                    continue;
+                }
+
+                // No tool call at all: the model is answering, so the task is done.
                 messages.push(assistant);
                 let _ = events.send(AgentEvent::Done { reason: StopReason::Completed }).await;
                 return StopReason::Completed;

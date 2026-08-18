@@ -236,7 +236,7 @@ pub async fn run_agent(
     let assisted = *state.assisted_approval.read().await;
     let mode = *state.mode.read().await;
 
-    let tools = WorkspaceTools::new(&workspace)
+    let mut tools = WorkspaceTools::new(&workspace)
         .with_media(
             state.client.clone(),
             policy.get(TaskClass::Vision).map(str::to_string),
@@ -281,7 +281,7 @@ pub async fn run_agent(
         }
     });
 
-    let reason: StopReason = runner.run(&prompt, &tools, gate.as_ref(), tx).await;
+    let reason: StopReason = runner.run(&prompt, &mut tools, gate.as_ref(), tx).await;
     let _ = pump.await;
 
     Ok(format!("{reason:?}"))

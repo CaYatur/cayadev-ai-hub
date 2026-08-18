@@ -14,9 +14,12 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 
 pub mod github;
 pub mod media;
+pub mod search;
 pub mod web;
 
 use crate::agent::runner::ToolExecutor;
@@ -48,6 +51,8 @@ pub struct WorkspaceTools {
     media: Option<media::MediaTools>,
     /// Search and page reading. Always available — they need nothing installed.
     web: web::WebTools,
+    /// Where `run_command` sends output while a command is still running.
+    progress: Option<mpsc::Sender<String>>,
 }
 
 impl WorkspaceTools {
@@ -63,6 +68,7 @@ impl WorkspaceTools {
             dry_run: false,
             media: None,
             web: web::WebTools::new(),
+            progress: None,
         }
     }
 
@@ -89,6 +95,7 @@ impl WorkspaceTools {
             github: None,
             media: None,
             web: web::WebTools::new(),
+            progress: None,
         }
     }
 
@@ -102,6 +109,7 @@ impl WorkspaceTools {
             github: None,
             media: None,
             web: web::WebTools::new(),
+            progress: None,
         }
     }
 
@@ -115,6 +123,54 @@ impl WorkspaceTools {
             Ok(_) => {}
             Err(e) => tracing::warn!("checkpoint for {} failed: {e}", path.display()),
         }
+    }
+
+    /// Run a command, relaying each line as it arrives.
+    ///
+    /// `Command::output()` says nothing until the process exits, so a two-minute
+    /// build looked identical to a hang. Reading the pipes line by line means
+    /// the user sees progress while the model still gets the whole thing at the
+    /// end — the transcript needs the complete output, the person needs it now.
+    async fn run_streaming(&self, program: &str, argv: &[String]) -> Result<String, String> {
+        let mut child = tokio::process::Command::new(program)
+            .args(argv)
+            .current_dir(&self.workspace)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("cannot run `{program}`: {e}"))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let out_task = tokio::spawn(pump(stdout, self.progress.clone(), ""));
+        let err_task = tokio::spawn(pump(stderr, self.progress.clone(), "stderr: "));
+
+        let status = tokio::time::timeout(COMMAND_TIMEOUT, child.wait())
+            .await
+            .map_err(|_| format!("command timed out after {}s", COMMAND_TIMEOUT.as_secs()))?
+            .map_err(|e| format!("`{program}` failed: {e}"))?;
+
+        let out = out_task.await.unwrap_or_default();
+        let err = err_task.await.unwrap_or_default();
+        let code = status.code().unwrap_or(-1);
+
+        let mut result = String::new();
+        if !out.trim().is_empty() {
+            result.push_str(&truncate(&out, MAX_OUTPUT_BYTES, "bytes"));
+        }
+        if !err.trim().is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str("stderr:\n");
+            result.push_str(&truncate(&err, MAX_OUTPUT_BYTES, "bytes"));
+        }
+        if result.is_empty() {
+            result.push_str("(no output)");
+        }
+        // The model needs the exit code to know whether to keep going.
+        Ok(format!("exit {code}\n{result}"))
     }
 
     /// Resolve a model-supplied path against the workspace.
@@ -135,6 +191,27 @@ impl WorkspaceTools {
     fn arg_str(args: &Map<String, Value>, key: &str) -> Option<String> {
         args.get(key).and_then(Value::as_str).map(str::to_string)
     }
+}
+
+/// Read one pipe to the end, relaying each line and returning the whole thing.
+async fn pump<R>(reader: Option<R>, progress: Option<mpsc::Sender<String>>, prefix: &'static str) -> String
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let Some(reader) = reader else { return String::new() };
+    let mut lines = BufReader::new(reader).lines();
+    let mut collected = String::new();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(tx) = &progress {
+            // A full channel means the UI is behind. Dropping a progress line
+            // is better than stalling the command that produced it.
+            let _ = tx.try_send(format!("{prefix}{line}"));
+        }
+        collected.push_str(&line);
+        collected.push('\n');
+    }
+    collected
 }
 
 /// Split a command line into program and arguments, respecting quotes.
@@ -258,6 +335,7 @@ impl ToolExecutor for WorkspaceTools {
             tools.extend(media.schemas());
         }
         tools.extend(web::WebTools::schemas());
+        tools.extend(search::schemas());
         tools
     }
 
@@ -280,9 +358,14 @@ impl ToolExecutor for WorkspaceTools {
             other if other.starts_with("gh_") => {
                 github::action_for(other, args, &self.workspace)
             }
+            other if search::handles(other) => Some(search::action_for(&self.workspace)),
             other if web::WebTools::handles(other) => web::WebTools::action_for(other, args),
             other => self.media.as_ref().and_then(|m| m.action_for(other, args)),
         }
+    }
+
+    fn set_progress(&mut self, tx: mpsc::Sender<String>) {
+        self.progress = Some(tx);
     }
 
     async fn execute(&self, name: &str, args: &Map<String, Value>) -> Result<String, String> {
@@ -372,39 +455,7 @@ impl ToolExecutor for WorkspaceTools {
                     return Ok(format!("[dry-run] would execute: {program} {}", argv.join(" ")));
                 }
 
-                let mut cmd = tokio::process::Command::new(&program);
-                cmd.args(&argv)
-                    .current_dir(&self.workspace)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-
-                let output = tokio::time::timeout(COMMAND_TIMEOUT, cmd.output())
-                    .await
-                    .map_err(|_| {
-                        format!("command timed out after {}s", COMMAND_TIMEOUT.as_secs())
-                    })?
-                    .map_err(|e| format!("cannot run `{program}`: {e}"))?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let code = output.status.code().unwrap_or(-1);
-
-                let mut result = String::new();
-                if !stdout.trim().is_empty() {
-                    result.push_str(&truncate(&stdout, MAX_OUTPUT_BYTES, "bytes"));
-                }
-                if !stderr.trim().is_empty() {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str("stderr:\n");
-                    result.push_str(&truncate(&stderr, MAX_OUTPUT_BYTES, "bytes"));
-                }
-                if result.is_empty() {
-                    result.push_str("(no output)");
-                }
-                // The model needs the exit code to know whether to keep going.
-                Ok(format!("exit {code}\n{result}"))
+                self.run_streaming(&program, &argv).await
             }
 
             other if other.starts_with("gh_") => match &self.github {
@@ -412,6 +463,7 @@ impl ToolExecutor for WorkspaceTools {
                 None => Err("this folder is not a git repository".into()),
             },
 
+            other if search::handles(other) => search::execute(&self.workspace, args),
             other if web::WebTools::handles(other) => self.web.execute(other, args).await,
 
             other => match &self.media {

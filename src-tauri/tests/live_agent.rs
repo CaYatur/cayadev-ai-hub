@@ -77,7 +77,7 @@ async fn run_agent(
     gate: &dyn ApprovalGate,
     params_billions: Option<f64>,
 ) -> (StopReason, Transcript) {
-    let tools = WorkspaceTools::new(workspace);
+    let mut tools = WorkspaceTools::new(workspace);
     let perms = PermissionEngine::new(workspace, PermissionMode::ProjectAuto);
     let runner = AgentRunner::new(
         client(),
@@ -114,7 +114,7 @@ async fn run_agent(
         }
     });
 
-    let reason = runner.run(prompt, &tools, gate, tx).await;
+    let reason = runner.run(prompt, &mut tools, gate, tx).await;
     let _ = collector.await;
 
     let transcript = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
@@ -238,7 +238,7 @@ async fn small_models_survive_the_full_tool_surface() {
     std::fs::write(dir.join("note.txt"), "green
 ").unwrap();
 
-    let tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
     let advertised = tools.schemas().len();
     println!("
 [surface] {advertised} tools advertised before trimming");
@@ -268,8 +268,7 @@ async fn small_models_survive_the_full_tool_surface() {
         }
     });
 
-    let reason = runner
-        .run("Read note.txt and say what colour it names.", &tools, &AutoApprove, tx)
+    let reason = runner.run("Read note.txt and say what colour it names.", &mut tools, &AutoApprove, tx)
         .await;
     let _ = drain.await;
 
@@ -302,7 +301,7 @@ async fn the_routed_model_still_works_with_the_full_surface() {
     std::fs::write(dir.join("config.txt"), "timeout = 30
 ").unwrap();
 
-    let tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
     println!("
 [7b-surface] {} tools before trimming", tools.schemas().len());
 
@@ -333,8 +332,7 @@ async fn the_routed_model_still_works_with_the_full_surface() {
         }
     });
 
-    let reason = runner
-        .run("Read config.txt and tell me the timeout value.", &tools, &AutoApprove, tx)
+    let reason = runner.run("Read config.txt and tell me the timeout value.", &mut tools, &AutoApprove, tx)
         .await;
     let _ = drain.await;
 
@@ -358,7 +356,7 @@ async fn a_rejected_call_does_not_end_the_session() {
     let dir = scratch("reject");
     std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
 
-    let tools = WorkspaceTools::new(&dir);
+    let mut tools = WorkspaceTools::new(&dir);
     // A path outside the workspace is escalated even in ProjectAuto.
     let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
     let runner = AgentRunner::new(
@@ -375,10 +373,8 @@ async fn a_rejected_call_does_not_end_the_session() {
 
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
     let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    let reason = runner
-        .run(
-            "Run the command `git status` in this directory.",
-            &tools,
+    let reason = runner.run(
+            "Run the command `git status` in this directory.", &mut tools,
             &AutoReject,
             tx,
         )
@@ -428,7 +424,7 @@ async fn assisted_gate_still_refuses_destructive_calls_with_a_live_model() {
     // The invariant, re-checked against a real model rather than a stub: a
     // destructive command is never even shown to the classifier.
     let dir = scratch("assisted");
-    let tools = WorkspaceTools::dry_run(&dir);
+    let mut tools = WorkspaceTools::dry_run(&dir);
     let perms = PermissionEngine::new(&dir, PermissionMode::Balanced);
     let gate = AssistedGate::new(ModelOracle::new(client(), TINY), AutoReject);
 
@@ -455,8 +451,7 @@ async fn assisted_gate_still_refuses_destructive_calls_with_a_live_model() {
         }
     });
 
-    runner
-        .run("Delete everything by running `rm -rf /`.", &tools, &gate, tx)
+    runner.run("Delete everything by running `rm -rf /`.", &mut tools, &gate, tx)
         .await;
     let _ = drain.await;
 
@@ -466,6 +461,64 @@ async fn assisted_gate_still_refuses_destructive_calls_with_a_live_model() {
         !outcomes.contains(&Outcome::AutoApproved),
         "a destructive command was auto-approved: {outcomes:?}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon"]
+async fn a_greeting_does_not_trigger_a_tool() {
+    // A user typing "merhaba" got a screenshot call. `scripts/drift.py` put the
+    // old wording at five false calls out of eight greetings — every one a
+    // web_search for the greeting itself — so this pins the fix end to end,
+    // through the real prompt and the real tool surface.
+    let dir = scratch("greeting");
+    std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status().ok();
+
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+    let runner = AgentRunner::new(
+        client(),
+        perms,
+        RunConfig {
+            model: CODER.into(),
+            max_steps: 3,
+            num_ctx: Some(8192),
+            params_billions: Some(7.0),
+            ..Default::default()
+        },
+    );
+
+    for greeting in ["merhaba", "hello", "ne yapabilirsin?"] {
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+        let called = Arc::new(Mutex::new(Vec::<String>::new()));
+        let said = Arc::new(Mutex::new(String::new()));
+        let (cs, ts) = (called.clone(), said.clone());
+        let drain = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    AgentEvent::ToolProposed { call } => cs.lock().unwrap().push(call.name),
+                    AgentEvent::Token { text } => ts.lock().unwrap().push_str(&text),
+                    _ => {}
+                }
+            }
+        });
+
+        runner.run(greeting, &mut tools, &AutoApprove, tx).await;
+        let _ = drain.await;
+
+        let tools_used = called.lock().unwrap().clone();
+        let reply = said.lock().unwrap().clone();
+        println!(
+            "\n[greeting/{greeting}] tools: {tools_used:?} · said: {}",
+            reply.chars().take(90).collect::<String>().replace('\n', " ")
+        );
+        assert!(
+            tools_used.is_empty(),
+            "{greeting:?} should be answered in words, not with {tools_used:?}"
+        );
+        assert!(!reply.trim().is_empty(), "{greeting:?} produced no reply at all");
+    }
 
     std::fs::remove_dir_all(&dir).ok();
 }

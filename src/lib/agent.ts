@@ -90,6 +90,7 @@ export type AgentEvent =
   | { kind: "thinking"; text: string }
   | { kind: "tool_proposed"; call: ProposedCall }
   | { kind: "tool_settled"; id: string; outcome: Outcome; output: string }
+  | { kind: "tool_progress"; text: string }
   | { kind: "step_done"; step: number; metrics: Metrics }
   | { kind: "done"; reason: string }
   | { kind: "error"; message: string };

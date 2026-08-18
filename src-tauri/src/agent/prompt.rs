@@ -67,8 +67,8 @@ impl PromptTier {
     /// at 5; where either actually degrades has not been measured.
     pub fn tool_budget(&self) -> usize {
         match self {
-            Self::Minimal => 5,
-            Self::Compact => 12,
+            Self::Minimal => 6,
+            Self::Compact => 13,
             Self::Full => usize::MAX,
         }
     }
@@ -83,6 +83,7 @@ const CORE_TOOLS: &[&str] = &[
     "edit_file",
     "write_file",
     "list_dir",
+    "search",
     "run_command",
 ];
 
@@ -159,28 +160,42 @@ pub fn system_prompt(tier: PromptTier, workspace: &str, tools: &[Tool]) -> Strin
         PromptTier::Minimal => {
             out.push_str(
                 "You are a coding assistant with tools.\n\
+                 Greetings and general questions get a plain answer, no tool.\n\
                  Call one tool at a time. Wait for its result before the next.\n\
-                 Answer directly when no tool is needed.\n",
+                 Use only the tool names you were given. Never invent one.\n",
             );
         }
+        // The "tools are for acting on the project" framing is measured, not
+        // guessed: `scripts/drift.py` put the previous wording at five false
+        // tool calls out of eight greetings on qwen2.5-coder:7b — every one of
+        // them a `web_search` for the word "hello" — and this at zero, with no
+        // loss on the task prompts.
         PromptTier::Compact => {
             out.push_str(
                 "You are a coding assistant working in a local project.\n\n\
-                 Rules:\n\
-                 - Use tools to read files before editing them. Never guess a file's contents.\n\
-                 - Call one tool at a time and wait for the result.\n\
-                 - Keep replies short. No preamble, no summary of what you are about to do.\n\
-                 - When the task is done, say so in one sentence.\n",
+                 Tools are for acting on the project. Most messages are not that.\n\
+                 - If the user is greeting you, thanking you, or asking a general \
+                 question, just reply. Do not call a tool.\n\
+                 - Call a tool only when asked to look at or change something \
+                 specific in this project.\n\
+                 - Read a file before editing it. Never guess its contents.\n\
+                 - One tool at a time. Wait for the result.\n\
+                 - Keep replies short. No preamble.\n",
             );
         }
         PromptTier::Full => {
             out.push_str(
                 "You are a coding assistant working in a local project.\n\n\
+                 Tools are for acting on the project. Most messages are not that.\n\
+                 - If the user is greeting you, thanking you, or asking a general \
+                 question, just reply. Do not call a tool.\n\
+                 - Call a tool only when asked to look at or change something \
+                 specific in this project.\n\n\
                  Approach:\n\
                  - Read before you write. Inspect the file, then make the edit.\n\
                  - Prefer the smallest change that solves the problem.\n\
                  - Match the surrounding code's style, naming, and comment density.\n\
-                 - Call one tool at a time and wait for its result before deciding the next step.\n\
+                 - One tool at a time. Wait for its result before deciding the next step.\n\
                  - If a tool fails, read the error and adapt. Do not retry the same call unchanged.\n\n\
                  Output:\n\
                  - Keep replies short and concrete. No preamble.\n\
@@ -342,7 +357,7 @@ mod tests {
             let name = format!("gh_tool_{i}");
             tools.push(named(&name));
         }
-        for n in ["read_document", "view_image", "screenshot", "adb"] {
+        for n in ["read_document", "view_image", "screenshot", "adb", "web_search", "web_read"] {
             tools.push(named(n));
         }
         tools
@@ -351,16 +366,18 @@ mod tests {
     #[test]
     fn a_small_model_is_not_handed_the_whole_surface() {
         let all = full_surface();
-        assert_eq!(all.len(), 21, "the surface this guards against");
+        assert_eq!(all.len(), 24, "the surface this guards against");
 
-        let minimal = select_tools(&all, PromptTier::Minimal);
-        assert_eq!(minimal.len(), 5);
-
-        let compact = select_tools(&all, PromptTier::Compact);
-        assert_eq!(compact.len(), 12);
-
+        assert_eq!(
+            select_tools(&all, PromptTier::Minimal).len(),
+            PromptTier::Minimal.tool_budget()
+        );
+        assert_eq!(
+            select_tools(&all, PromptTier::Compact).len(),
+            PromptTier::Compact.tool_budget()
+        );
         // A capable model still gets everything.
-        assert_eq!(select_tools(&all, PromptTier::Full).len(), 21);
+        assert_eq!(select_tools(&all, PromptTier::Full).len(), all.len());
     }
 
     #[test]

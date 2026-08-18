@@ -138,6 +138,21 @@ export default function App() {
             append(id, { kind: "tool", call: event.call });
             break;
 
+          case "tool_progress":
+            patch(id, (s) => {
+              const entries = [...s.entries];
+              // Attach to the call still running, which is the last unsettled one.
+              for (let i = entries.length - 1; i >= 0; i--) {
+                const e = entries[i];
+                if (e.kind === "tool" && !e.settled) {
+                  entries[i] = { ...e, output: (e.output ?? "") + event.text + "\n" };
+                  break;
+                }
+              }
+              return { ...s, entries };
+            });
+            break;
+
           case "tool_settled":
             patch(id, (s) => {
               const entries = [...s.entries];
