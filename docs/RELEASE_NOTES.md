@@ -1,3 +1,116 @@
+# v0.2.0 — the things that broke in real use
+
+v0.1.0 was measured against benchmarks. This one is measured against a week of
+somebody actually using it. Every item below is a bug that showed up in normal
+use, and every fix is verified against a real model rather than argued for.
+
+## Replies were being cut off
+
+Ollama trims a request that exceeds the window from the **front** — which is
+where the system prompt and the task are — and its template then answers
+`500 {"error":"no user query found in messages"}`. Long sessions died mid-reply.
+
+The conversation is now trimmed before it is sent, from the middle, pinning the
+system prompt, the current instruction and the recent steps. It cuts well under
+the threshold rather than to it, so several steps pass before the next trim and
+the daemon keeps reusing its KV cache. A stall gets one retry at half the window
+instead of ending the run.
+
+## The model could not remember the conversation
+
+Every run started from an empty conversation. Asked *"Az önce ben sana ne
+yazmıştım?"*, the model answered with that question — genuinely the only message
+it had.
+
+Earlier turns are now replayed between the system prompt and the instruction, so
+the system prefix stays byte-stable and the cache still hits. Reasoning is left
+out; tool calls are folded to one summary line each, so the model knows it
+already wrote `test.txt` without carrying the four thousand characters a read
+costs. Declined and failed calls are marked, so it does not retry what was
+refused, and an attached image leaves a marker so a follow-up knows a picture
+was there.
+
+Verified on `qwen2.5-coder:7b`: a second turn recalls a number from the first,
+and names a file the previous turn created.
+
+## "I don't have access to your computer's screen"
+
+Asked *"bilgisayarımın ekranında şuanda ne açık?"*, `gpt-oss:20b` reasoned its
+way to that answer with `screenshot` sitting in its tool list. Its own reasoning
+quoted the rule back: call a tool only for something "specific in this project",
+and a screen is not a file in a folder.
+
+The rule now names what else counts — a file here, the screen, a web page, a
+connected phone — and adds one line: never claim you cannot see something you
+have a tool for. The wording it replaces was measured, so the replacement was
+measured the same way. `scripts/drift.py` gained a third category for things
+that need a tool but are not in the project; the new wording holds **zero false
+calls out of eight** conversational inputs on the 7B, where the old one fails the
+screen question on gpt-oss:20b.
+
+## An attached image took two hops and a guess
+
+Attaching a picture put a line in the message saying where the file was, and the
+coding model had to decide to call `view_image`, which went to a vision model and
+came back. The first hop is a decision, and deciding is what small models get
+wrong.
+
+The image now goes in the message, on a model that can see it — the run is handed
+to one if the chosen model cannot. Some vision models cannot call tools at all
+(`qwen2.5vl:7b` advertises `completion` and `vision` and nothing else, and Ollama
+refuses a request that offers tools to it), so those runs carry no tools field at
+all. Measured: a red square, one step, no tool call, answer "Red" at 66 tok/s.
+
+## A console window flashed on every message
+
+A Windows GUI app has no console, so one was created for every child process. All
+spawning now goes through one place that sets `CREATE_NO_WINDOW`, so a new call
+site cannot forget.
+
+## The agent read the app's own notes
+
+Undo history lived in `.cayahub/` inside the project. The agent found it, read
+the journal, and spent steps reasoning about it — and it showed up in searches
+and in git status. It now lives under the OS data directory, one directory per
+workspace, named and hashed so two projects called `app` stay separate.
+
+## New
+
+- **`ask_user`** — the agent asks instead of guessing. Choices or a written
+  answer, and Skip is reported as a skip so it proceeds on its own judgement
+  rather than reading silence as agreement. Verified: given two plausible config
+  files and nothing to choose between them, the 7B asks, takes the answer, and
+  reads the one picked.
+- **Markdown replies** — headings, lists, tables, syntax-coloured code against
+  the app's own palette, and links that open: a URL in the browser, a file path
+  in its application. Paths in backticks are clickable; `array.map` is not.
+- **Live tok/s and context occupancy**, timed from the first token so a cold
+  model load is not averaged into the rate.
+- **Following the output properly.** The old effect fired on the entry count,
+  which does not change while a reply streams into the last entry, and used
+  smooth scrolling, which restarts on every token and never arrives. The
+  reasoning box scrolls inside itself and needed the same treatment separately.
+- **Attachments belong to their message** — shown with a preview on the turn
+  that sent them, gone from the composer once sent, and not silently re-sent
+  with the next question. Sizes read "4.2 KB" rather than "0 MB".
+- **Stop reaches a parked run** — one waiting on an approval or a question, not
+  only one mid-token.
+- A stall now says which kind it was: nothing at all means the weights are still
+  loading or do not fit; a gap mid-reply means they fit badly and are being
+  paged.
+
+## Tested
+
+206 unit tests, and 21 live tests against `qwen2.5-coder:7b`, `qwen2.5vl:7b`,
+`qwen2.5-coder:0.5b` and `gpt-oss:20b` on an 8 GB card.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
+---
+
 # v0.1.0 — first release
 
 A local-first agent runtime for Ollama, built around one finding: on consumer
