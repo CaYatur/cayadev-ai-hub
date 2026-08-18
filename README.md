@@ -82,6 +82,18 @@ the constant yes/no decisions go to a 0.5B model that answers in milliseconds.
 - Optional model-assisted approval that can *only* turn "ask" into "allow", is
   never shown a destructive call, and receives computed facts rather than any
   attacker-controllable text
+- Checkpoints: every agent edit is captured before it happens and can be
+  reverted; the store is refused to the agent in every mode
+- Publishing to GitHub is confirmed even in unrestricted mode
+
+**Reach**
+- GitHub: issues, pull requests, releases, Actions, checks, diffs — with
+  multi-command flows collapsed into single calls so small models finish them
+- Documents: PDF, Word, Excel, PowerPoint, CSV
+- Images and screenshots, delegated to a vision model so the coding model does
+  not have to be multimodal
+- Android devices over ADB: screen, UI hierarchy, logs
+- Turkish and English interface, Turkish by default
 
 ## Status
 
@@ -104,10 +116,13 @@ Measured on the development machine, in a scratch directory:
 body with an empty `tool_calls` field.** Without tolerant parsing this agent
 would do nothing at all — which is the whole thesis, confirmed end to end.
 
-The desktop app has a streaming chat, per-call tool cards, an approve/reject
-bar, and a permission-mode selector. What it does **not** have yet: checkpoints
-(use git), Turkish/English i18n, and a search tool. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) for the honest split, and
+The desktop app has a session sidebar, streaming chat with collapsible tool
+rows, message actions, an approve/reject bar, and composer controls for
+permission mode, model, effort, and context window.
+
+Still missing: an undo button in the UI (checkpoints exist and restore, but
+nothing surfaces them yet), a search tool, streamed command output, and
+audio/video. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the honest split, and
 [`docs/SPEED.md`](docs/SPEED.md) for what does and does not make local models
 faster.
 
@@ -115,6 +130,10 @@ faster.
 
 - [Ollama](https://ollama.com) 0.32 or newer, with at least one model pulled
 - Node.js 20+ and Rust 1.80+ to build from source
+- Optional: the GitHub CLI (`gh`) for the GitHub tools, `adb` for Android, and
+  Python with `pymupdf python-docx openpyxl python-pptx` for PDF/Word/Excel.
+  Each tool hides itself when its dependency is missing rather than failing
+  mid-task.
 
 ## Build
 

@@ -87,15 +87,16 @@ export function formatElapsed(ms: number): string {
 }
 
 /// Relative time in the short form a message footer wants.
-export function formatAgo(at?: number): string {
+export function formatAgo(at?: number, locale?: string): string {
   if (!at) return "";
-  const seconds = Math.floor((Date.now() - at) / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  const rtf = new Intl.RelativeTimeFormat(locale ?? "en", { numeric: "auto" });
+  const seconds = Math.round((at - Date.now()) / 1000);
+  if (Math.abs(seconds) < 60) return rtf.format(seconds, "second");
+  const minutes = Math.round(seconds / 60);
+  if (Math.abs(minutes) < 60) return rtf.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
+  return rtf.format(Math.round(hours / 24), "day");
 }
 
 export function formatTokens(n: number): string {
@@ -105,16 +106,19 @@ export function formatTokens(n: number): string {
 }
 
 /// Group sessions the way a person thinks about them.
+///
+/// Returns translation keys rather than words, so the sidebar reads in the
+/// user's language.
 export function groupByAge(sessions: Session[]): [string, Session[]][] {
   const day = 24 * 60 * 60 * 1000;
   const now = Date.now();
-  const buckets: Record<string, Session[]> = { Today: [], Yesterday: [], Earlier: [] };
+  const buckets: Record<string, Session[]> = { today: [], yesterday: [], earlier: [] };
 
   for (const s of sessions) {
     const age = now - s.createdAt;
-    if (age < day) buckets.Today.push(s);
-    else if (age < 2 * day) buckets.Yesterday.push(s);
-    else buckets.Earlier.push(s);
+    if (age < day) buckets.today.push(s);
+    else if (age < 2 * day) buckets.yesterday.push(s);
+    else buckets.earlier.push(s);
   }
   return Object.entries(buckets).filter(([, list]) => list.length > 0);
 }

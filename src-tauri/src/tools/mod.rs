@@ -16,6 +16,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 pub mod github;
+pub mod media;
 
 use crate::agent::runner::ToolExecutor;
 use crate::checkpoint::{ChangeKind, CheckpointStore};
@@ -41,6 +42,9 @@ pub struct WorkspaceTools {
     checkpoints: Option<CheckpointStore>,
     /// GitHub tools, offered only when the workspace is actually a repository.
     github: Option<github::GitHubTools>,
+    /// Document, image, and device tools. `None` until `with_media` is called,
+    /// because they need an Ollama client to delegate vision to.
+    media: Option<media::MediaTools>,
 }
 
 impl WorkspaceTools {
@@ -54,19 +58,33 @@ impl WorkspaceTools {
                 .then(|| github::GitHubTools::new(&workspace)),
             workspace,
             dry_run: false,
+            media: None,
         }
+    }
+
+    /// Enable document, image, and device tools.
+    ///
+    /// `vision_model` is whichever model routing picked for images; without one
+    /// the image tools are not advertised at all.
+    pub fn with_media(
+        mut self,
+        client: crate::ollama::OllamaClient,
+        vision_model: Option<String>,
+    ) -> Self {
+        self.media = Some(media::MediaTools::new(&self.workspace, client, vision_model));
+        self
     }
 
     /// Build a tool surface that never actually executes commands.
     pub fn dry_run(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        Self { workspace, dry_run: true, checkpoints: None, github: None }
+        Self { workspace, dry_run: true, checkpoints: None, github: None, media: None }
     }
 
     /// Build a tool surface with no undo history.
     pub fn without_checkpoints(workspace: impl Into<PathBuf>) -> Self {
         let workspace = workspace.into();
-        Self { workspace, dry_run: false, checkpoints: None, github: None }
+        Self { workspace, dry_run: false, checkpoints: None, github: None, media: None }
     }
 
     /// Capture a file's prior state, labelled with the call that will change it.
@@ -218,6 +236,9 @@ impl ToolExecutor for WorkspaceTools {
         if self.github.is_some() {
             tools.extend(github::schemas());
         }
+        if let Some(media) = &self.media {
+            tools.extend(media.schemas());
+        }
         tools
     }
 
@@ -240,7 +261,7 @@ impl ToolExecutor for WorkspaceTools {
             other if other.starts_with("gh_") => {
                 github::action_for(other, args, &self.workspace)
             }
-            _ => None,
+            other => self.media.as_ref().and_then(|m| m.action_for(other, args)),
         }
     }
 
@@ -371,7 +392,10 @@ impl ToolExecutor for WorkspaceTools {
                 None => Err("this folder is not a git repository".into()),
             },
 
-            other => Err(format!("unknown tool `{other}`")),
+            other => match &self.media {
+                Some(media) if media.handles(other) => media.execute(other, args).await,
+                _ => Err(format!("unknown tool `{other}`")),
+            },
         }
     }
 }

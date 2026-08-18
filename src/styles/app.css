@@ -1246,3 +1246,29 @@
   font-size: 10.5px;
   color: var(--text-faint);
 }
+
+/* Language picker lives with the connection status: both are app-level facts
+ * that belong out of the way of the transcript. */
+.foot-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lang-select {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 10.5px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.lang-select:hover {
+  border-color: var(--border);
+  color: var(--text-primary);
+}

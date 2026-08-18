@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
@@ -19,24 +20,12 @@ import {
 } from "../lib/sessions";
 import { Popover, PopoverDivider, PopoverItem, PopoverLabel } from "./Popover";
 
-const MODES: { value: PermissionMode; name: string; hint: string }[] = [
-  { value: "read_only", name: "Read only", hint: "Reads run. Writes and commands are confirmed." },
-  { value: "project_auto", name: "Project auto", hint: "Reads and writes in the folder run automatically." },
-  { value: "balanced", name: "Balanced", hint: "Also runs commands classified as read-only." },
-  { value: "unrestricted", name: "Unrestricted", hint: "Runs almost everything unattended." },
-];
-
-const EFFORTS: { value: Effort; name: string; hint: string }[] = [
-  { value: "fast", name: "Fast", hint: "No thinking, 8 steps. For edits and lookups." },
-  { value: "balanced", name: "Balanced", hint: "No thinking, 24 steps." },
-  { value: "thorough", name: "Thorough", hint: "Thinking where supported, 48 steps." },
-];
-
-const MODE_NAME = (m: PermissionMode) => MODES.find((x) => x.value === m)?.name ?? m;
-const EFFORT_NAME = (e: Effort) => EFFORTS.find((x) => x.value === e)?.name ?? e;
+const MODES: PermissionMode[] = ["read_only", "project_auto", "balanced", "unrestricted"];
+const EFFORTS: Effort[] = ["fast", "balanced", "thorough"];
 
 /** A tool call, collapsed to one scannable line until the user opens it. */
 function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const note = RECOVERY_NOTE[entry.call.recovery];
   const state = entry.settled ?? "waiting";
@@ -48,23 +37,25 @@ function ToolRow({ entry }: { entry: Extract<Entry, { kind: "tool" }> }) {
         <span className="toolrow-summary">{summarize(entry.call, entry.output)}</span>
         {note && (
           <span className="toolrow-flag" title={note}>
-            rescued
+            {t("chat.rescued")}
           </span>
         )}
-        {state === "waiting" && <span className="toolrow-wait">waiting</span>}
+        {state === "waiting" && <span className="toolrow-wait">{t("chat.waiting")}</span>}
         {(state === "denied" || state === "user_rejected") && (
-          <span className="toolrow-denied">{state === "denied" ? "refused" : "rejected"}</span>
+          <span className="toolrow-denied">
+            {state === "denied" ? t("chat.refused") : t("chat.rejected")}
+          </span>
         )}
       </button>
 
       {open && (
         <div className="toolrow-body">
-          <div className="toolrow-label">arguments</div>
+          <div className="toolrow-label">{t("chat.arguments")}</div>
           <pre className="code-block">{JSON.stringify(entry.call.arguments, null, 2)}</pre>
           {note && <div className="toolrow-note">{note}</div>}
           {entry.output && (
             <>
-              <div className="toolrow-label">result</div>
+              <div className="toolrow-label">{t("chat.result")}</div>
               <pre className="code-block">{entry.output.slice(0, 4000)}</pre>
             </>
           )}
@@ -92,6 +83,7 @@ function UserTurn({
   onRemove: (index: number) => void;
   onBranch: (index: number) => void;
 }) {
+  const { t, i18n } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   function copy() {
@@ -104,12 +96,12 @@ function UserTurn({
     <div className="userwrap">
       <div className="bubble">{entry.text}</div>
       <div className="msg-actions">
-        <button className="msg-action" title="Copy" onClick={copy}>
+        <button className="msg-action" title={t("chat.copy")} onClick={copy}>
           {copied ? "✓" : "⧉"}
         </button>
         <button
           className="msg-action"
-          title="Run this again, discarding what followed"
+          title={t("chat.retry")}
           onClick={() => onRetry(index)}
           disabled={busy}
         >
@@ -117,20 +109,20 @@ function UserTurn({
         </button>
         <button
           className="msg-action"
-          title="Continue from here in a new session"
+          title={t("chat.branch")}
           onClick={() => onBranch(index)}
         >
           ⑂
         </button>
         <button
           className="msg-action msg-action-danger"
-          title="Delete this message and everything after it"
+          title={t("chat.delete")}
           onClick={() => onRemove(index)}
           disabled={busy}
         >
           ✕
         </button>
-        <span className="msg-time">{formatAgo(entry.at)}</span>
+        <span className="msg-time">{formatAgo(entry.at, i18n.language)}</span>
       </div>
     </div>
   );
@@ -146,7 +138,8 @@ function ContextMeter({
   limit: number | null;
   trainedMax: number | null;
 }) {
-  if (!limit) return <span className="ctx-empty">context —</span>;
+  const { t } = useTranslation();
+  if (!limit) return <span className="ctx-empty">{t("context.none")}</span>;
   const pct = Math.min(100, Math.round((used / limit) * 100));
   const tone = pct >= 90 ? "ctx-hot" : pct >= 70 ? "ctx-warm" : "ctx-ok";
 
@@ -218,6 +211,7 @@ export default function Chat({
   onCopy: (text: string) => void;
   onBranch: (index: number) => void;
 }) {
+  const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
   const [menu, setMenu] = useState<"mode" | "model" | "effort" | "ctx" | null>(null);
   const [ctxOptions, setCtxOptions] = useState<ContextOptions | null>(null);
@@ -267,10 +261,7 @@ export default function Chat({
     // The one mode that can damage things outside the project takes a
     // deliberate confirmation, not a single click in a menu.
     if (next === "unrestricted") {
-      const ok = window.confirm(
-        "Unrestricted mode runs commands and writes files without asking, " +
-          "including outside this folder.\n\nContinue?",
-      );
+      const ok = window.confirm(t("modes.unrestrictedWarning"));
       if (!ok) return;
     }
     onMode(next);
@@ -294,15 +285,15 @@ export default function Chat({
         <button
           className="chip chip-folder"
           onClick={pickFolder}
-          title={session.workspace ?? "No folder selected"}
+          title={session.workspace ?? t("chat.noFolder")}
         >
-          {folderName ?? "choose folder"}
+          {folderName ?? t("chat.chooseFolder")}
         </button>
       </header>
 
       {mode === "unrestricted" && (
         <div className="danger-banner">
-          Unrestricted mode — the agent runs commands and writes files without asking.
+          {t("modes.unrestrictedBanner")}
         </div>
       )}
 
@@ -310,11 +301,9 @@ export default function Chat({
         {session.entries.length === 0 && (
           <div className="empty">
             <div className="empty-mark">▮</div>
-            <h2>What should the agent do?</h2>
+            <h2>{t("chat.emptyTitle")}</h2>
             <p>
-              {session.workspace
-                ? "Describe a task. Routing picks a model that fits in VRAM."
-                : "Choose a project folder to begin."}
+              {session.workspace ? t("chat.emptyWithFolder") : t("chat.emptyNoFolder")}
             </p>
           </div>
         )}
@@ -353,7 +342,7 @@ export default function Chat({
 
         {running && !pending && (
           <div className="working">
-            <span className="pulse" /> working…
+            <span className="pulse" /> {t("chat.working")}
           </div>
         )}
         <div ref={bottom} />
@@ -363,17 +352,17 @@ export default function Chat({
         <div className="approval">
           <div className="approval-body">
             <div className="approval-title">
-              Approve <code>{pending.name}</code>?
+              {t("approval.title", { tool: pending.name })}
             </div>
             <div className="approval-reason">{pending.evaluation.reason}</div>
             <pre className="code-block">{JSON.stringify(pending.arguments, null, 2)}</pre>
           </div>
           <div className="approval-actions">
             <button className="btn" onClick={() => onAnswer(false)}>
-              Reject
+              {t("approval.reject")}
             </button>
             <button className="btn btn-primary" onClick={() => onAnswer(true)}>
-              Approve
+              {t("approval.approve")}
             </button>
           </div>
         </div>
@@ -384,7 +373,7 @@ export default function Chat({
           <textarea
             className="input"
             rows={2}
-            placeholder={session.workspace ? "Describe a task…" : "Choose a folder first"}
+            placeholder={session.workspace ? t("chat.placeholder") : t("chat.placeholderNoFolder")}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={(e) => {
@@ -399,7 +388,7 @@ export default function Chat({
             className="send"
             onClick={send}
             disabled={running || !prompt.trim() || !session.workspace}
-            title="Send (Enter)"
+            title={t("chat.send")}
           >
             ↵
           </button>
@@ -411,26 +400,26 @@ export default function Chat({
               className={menu === "mode" ? "ctl ctl-on" : "ctl"}
               onClick={() => setMenu(menu === "mode" ? null : "mode")}
             >
-              {MODE_NAME(mode)}
+              {t(`modes.${mode}`)}
               <span className="caret">⌃</span>
             </button>
             <Popover open={menu === "mode"} onClose={() => setMenu(null)} width={290}>
-              <PopoverLabel>Permissions</PopoverLabel>
+              <PopoverLabel>{t("modes.label")}</PopoverLabel>
               {MODES.map((m, i) => (
                 <PopoverItem
-                  key={m.value}
-                  label={m.name}
-                  hint={m.hint}
-                  selected={mode === m.value}
+                  key={m}
+                  label={t(`modes.${m}`)}
+                  hint={t(`modes.${m}_hint`)}
+                  selected={mode === m}
                   shortcut={String(i + 1)}
-                  danger={m.value === "unrestricted"}
-                  onClick={() => changeMode(m.value)}
+                  danger={m === "unrestricted"}
+                  onClick={() => changeMode(m)}
                 />
               ))}
               <PopoverDivider />
               <PopoverItem
-                label="Assisted approval"
-                hint="A small model settles routine confirmations. Never destructive ones."
+                label={t("modes.assisted")}
+                hint={t("modes.assistedHint")}
                 selected={assisted}
                 onClick={() => onAssisted(!assisted)}
               />
@@ -442,24 +431,24 @@ export default function Chat({
               className={menu === "ctx" ? "ctl ctl-quiet ctl-on" : "ctl ctl-quiet"}
               onClick={() => setMenu(menu === "ctx" ? null : "ctx")}
               disabled={!ctxOptions}
-              title={ctxOptions ? "Context window" : "No model resolved yet"}
+              title={ctxOptions ? t("context.label") : t("context.pickModel")}
             >
               <ContextMeter used={session.contextUsed} limit={limit} trainedMax={trainedMax} />
             </button>
             <Popover open={menu === "ctx"} onClose={() => setMenu(null)} width={270}>
-              <PopoverLabel>Context window</PopoverLabel>
+              <PopoverLabel>{t("context.label")}</PopoverLabel>
               <div className="popover-note">
                 {trainedMax
-                  ? `Trained for ${formatTokens(trainedMax)} tokens. A larger window reserves more VRAM and can push the model out of it.`
-                  : "No trained maximum reported."}
+                  ? t("context.trained", { max: formatTokens(trainedMax) })
+                  : t("context.noMax")}
               </div>
               <PopoverDivider />
               <PopoverItem
-                label="Recommended"
+                label={t("context.recommended")}
                 hint={
                   ctxOptions?.recommended
-                    ? `${formatTokens(ctxOptions.recommended)} — the largest that keeps the model resident`
-                    : "Not computed"
+                    ? t("context.recommendedHint", { size: formatTokens(ctxOptions.recommended) })
+                    : t("context.notComputed")
                 }
                 selected={numCtx === null}
                 onClick={() => {
@@ -488,7 +477,7 @@ export default function Chat({
               className={menu === "model" ? "ctl ctl-on" : "ctl"}
               onClick={() => setMenu(menu === "model" ? null : "model")}
             >
-              {model || `Auto${routing?.coding ? ` · ${routing.coding}` : ""}`}
+              {model || `${t("modelsView.auto")}${routing?.coding ? ` · ${routing.coding}` : ""}`}
               <span className="caret">⌃</span>
             </button>
             <Popover
@@ -497,10 +486,10 @@ export default function Chat({
               align="right"
               width={330}
             >
-              <PopoverLabel>Models</PopoverLabel>
+              <PopoverLabel>{t("modelsView.label")}</PopoverLabel>
               <PopoverItem
-                label="Auto"
-                hint="Routing picks by task and what fits in VRAM"
+                label={t("modelsView.auto")}
+                hint={t("modelsView.autoHint")}
                 selected={model === ""}
                 onClick={() => {
                   onModel("");
@@ -517,7 +506,7 @@ export default function Chat({
                       ? `${m.parameter_size} · ${m.placement.replace("_", " ")}`
                       : m.placement
                   }
-                  badge={m.placement === "spilled" ? "slow" : undefined}
+                  badge={m.placement === "spilled" ? t("modelsView.slow") : undefined}
                   selected={model === m.name}
                   shortcut={i < 9 ? String(i + 1) : undefined}
                   onClick={() => {
@@ -534,7 +523,7 @@ export default function Chat({
               className={menu === "effort" ? "ctl ctl-on" : "ctl"}
               onClick={() => setMenu(menu === "effort" ? null : "effort")}
             >
-              {EFFORT_NAME(effort)}
+              {t(`effort.${effort}`)}
             </button>
             <Popover
               open={menu === "effort"}
@@ -542,21 +531,18 @@ export default function Chat({
               align="right"
               width={290}
             >
-              <PopoverLabel>Effort</PopoverLabel>
-              <div className="popover-note">
-                Thinking and step budget. Both change how long a task takes on a
-                local model.
-              </div>
+              <PopoverLabel>{t("effort.label")}</PopoverLabel>
+              <div className="popover-note">{t("effort.note")}</div>
               <PopoverDivider />
               {EFFORTS.map((e, i) => (
                 <PopoverItem
-                  key={e.value}
-                  label={e.name}
-                  hint={e.hint}
-                  selected={effort === e.value}
+                  key={e}
+                  label={t(`effort.${e}`)}
+                  hint={t(`effort.${e}_hint`)}
+                  selected={effort === e}
                   shortcut={String(i + 1)}
                   onClick={() => {
-                    onEffort(e.value);
+                    onEffort(e);
                     setMenu(null);
                   }}
                 />
@@ -569,7 +555,7 @@ export default function Chat({
           <span className="status-mark">✳</span>
           <span>{formatElapsed(session.elapsedMs)}</span>
           <span className="sep">·</span>
-          <span>{formatTokens(session.tokens)} used</span>
+          <span>{formatTokens(session.tokens)} {t("chat.used")}</span>
           {session.lastRate !== null && (
             <>
               <span className="sep">·</span>
@@ -578,7 +564,7 @@ export default function Chat({
           )}
           {running && (
             <button className="status-cancel" onClick={onCancel}>
-              Stop
+              {t("chat.stop")}
             </button>
           )}
         </div>

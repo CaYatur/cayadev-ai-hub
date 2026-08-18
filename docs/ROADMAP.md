@@ -84,6 +84,30 @@ everything else is not built yet, however well specified it looks.
 - Budget read from `nvidia-smi` rather than assumed, fixing a wrong routing
   decision caused by the old fixed reserve
 
+### Checkpoints — `src-tauri/src/checkpoint/`
+- Prior contents captured before every write and edit, content-addressed by
+  SHA-256 so repeated edits to unchanged files cost one object
+- Files over 8 MB journalled as "not captured" rather than copied
+- The store is refused to the agent in every mode and gitignores itself
+
+### GitHub — `src-tauri/src/tools/github.rs`
+- Status, issues, PRs, releases, Actions runs, checks, diffs, commit, push
+- `gh_open_pr` and `gh_create_release` collapse multi-command flows into one
+  call, because six tool calls is six model turns a small model will not survive
+- Publishing is `Action::Publish`, confirmed in every mode including
+  Unrestricted
+- Only advertised inside a git repository
+
+### Documents, images, devices — `src-tauri/src/tools/media.rs`
+- PDF, Word, Excel, PowerPoint via a Python sidecar; text and CSV in Rust
+- `view_image` and `screenshot` delegate to the routed vision model and return
+  a description, so a non-multimodal coding model can still act on an image
+- ADB: devices, screen, UI hierarchy, logcat
+- Tools are advertised only when their dependency is actually present
+
+### Interface
+- Turkish and English, Turkish default, switchable in the sidebar
+
 ### Measurement
 - Reproducible benchmark harness (`scripts/bench.py`) that pins `num_ctx` and
   records the placement the daemon actually chose
@@ -94,8 +118,9 @@ everything else is not built yet, however well specified it looks.
 - **GPU probing is NVIDIA-only.** AMD and Intel hosts fall back to the fixed
   assumption. `refresh_vram_budget` returns an error there, and the UI should
   offer a manual figure.
-- **No checkpoints yet**, so an agent edit is not undoable from inside the app.
-  Use git.
+- **Document extraction needs Python** with pymupdf, python-docx, and openpyxl.
+  Bundling an interpreter would roughly double the release, so it is a declared
+  prerequisite and the tools hide themselves when it is absent.
 - **Windows-only testing.** Nothing is deliberately platform-specific, but the
   path and command tests have only been exercised on Windows.
 - **The UI has not been driven by hand end to end, and its appearance is
@@ -108,13 +133,13 @@ everything else is not built yet, however well specified it looks.
 
 In dependency order.
 
-1. **Checkpoints** — content-addressed undo of agent file changes, stored in
-   the project directory, deduplicated so history stays small
-2. **i18n** — Turkish and English, Turkish default
-3. **Search tool** — content and filename search, which the agent currently
-   lacks and works around with `run_command`
-4. **Streamed command output** — long-running commands currently return only
-   when they finish
+1. **Undo from the UI** — checkpoints are captured and restorable from Rust,
+   but no button surfaces them yet
+2. **Search tool** — content and filename search, which the agent currently
+   works around with `run_command`
+3. **Streamed command output** — long-running commands return only when they
+   finish
+4. **Audio and video** — transcription and analysis are still unbuilt
 
 ## Later
 

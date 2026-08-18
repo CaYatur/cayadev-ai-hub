@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+import { LANGUAGES, setLanguage, type LanguageCode } from "../i18n";
 import { groupByAge, type Session } from "../lib/sessions";
 
 export default function Sidebar({
@@ -15,27 +17,26 @@ export default function Sidebar({
   onDelete: (id: string) => void;
   version: string | null;
 }) {
+  const { t, i18n } = useTranslation();
   const groups = groupByAge(sessions);
 
   return (
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="brand">
-          CaYa<span>Dev</span> AI Hub
+          CaYa<span>Dev</span> {t("app.brandSuffix")}
         </div>
       </div>
 
       <button className="new-session" onClick={onNew}>
-        <span className="plus">+</span> New session
+        <span className="plus">+</span> {t("app.newSession")}
       </button>
 
       <nav className="session-list">
-        {sessions.length === 0 && (
-          <p className="sidebar-empty">No sessions yet.</p>
-        )}
-        {groups.map(([label, list]) => (
-          <div key={label} className="session-group">
-            <div className="session-group-label">{label}</div>
+        {sessions.length === 0 && <p className="sidebar-empty">{t("app.noSessions")}</p>}
+        {groups.map(([key, list]) => (
+          <div key={key} className="session-group">
+            <div className="session-group-label">{t(`app.${key}`)}</div>
             {list.map((s) => (
               <div
                 key={s.id}
@@ -51,7 +52,7 @@ export default function Sidebar({
                 </span>
                 <button
                   className="session-delete"
-                  title="Delete session"
+                  title={t("app.deleteSession")}
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete(s.id);
@@ -67,7 +68,21 @@ export default function Sidebar({
 
       <div className="sidebar-foot">
         <span className={version ? "dot dot-ok" : "dot dot-off"} />
-        {version ? `Ollama ${version}` : "Ollama offline"}
+        <span className="foot-text">
+          {version ? t("app.online", { version }) : t("app.offline")}
+        </span>
+        <select
+          className="lang-select"
+          value={i18n.language}
+          onChange={(e) => setLanguage(e.target.value as LanguageCode)}
+          title={t("language.label")}
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.label}
+            </option>
+          ))}
+        </select>
       </div>
     </aside>
   );

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import Chat from "./components/Chat";
 import Models from "./components/Models";
 import Sidebar from "./components/Sidebar";
@@ -25,6 +26,7 @@ import "./styles/app.css";
 type View = "chat" | "models";
 
 export default function App() {
+  const { t } = useTranslation();
   const [sessions, setSessions] = useState<Session[]>(() => {
     const stored = load();
     return stored.length > 0 ? stored : [newSession()];
@@ -145,7 +147,7 @@ export default function App() {
             if (event.reason !== "completed") {
               append(id, {
                 kind: "notice",
-                text: `Stopped: ${event.reason.replace(/_/g, " ")}`,
+                text: t("chat.stopped", { reason: event.reason.replace(/_/g, " ") }),
                 tone: "info",
               });
             }
@@ -165,7 +167,7 @@ export default function App() {
       cancelled = true;
       off?.();
     };
-  }, [append, patch]);
+  }, [append, patch, t]);
 
   const setWorkspace = useCallback(
     async (path: string) => {
@@ -322,13 +324,13 @@ export default function App() {
             className={view === "chat" ? "viewtab viewtab-on" : "viewtab"}
             onClick={() => setView("chat")}
           >
-            Agent
+            {t("app.agent")}
           </button>
           <button
             className={view === "models" ? "viewtab viewtab-on" : "viewtab"}
             onClick={() => setView("models")}
           >
-            Models
+            {t("app.models")}
           </button>
         </div>
 

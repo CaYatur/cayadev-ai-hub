@@ -219,7 +219,11 @@ pub async fn run_agent(
     let assisted = *state.assisted_approval.read().await;
     let mode = *state.mode.read().await;
 
-    let tools = WorkspaceTools::new(&workspace);
+    let tools = WorkspaceTools::new(&workspace)
+        .with_media(
+            state.client.clone(),
+            policy.get(TaskClass::Vision).map(str::to_string),
+        );
     let perms = PermissionEngine::new(&workspace, mode);
     let runner = AgentRunner::new(
         state.client.clone(),
