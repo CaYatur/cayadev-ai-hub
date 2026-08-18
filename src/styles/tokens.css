@@ -1,0 +1,121 @@
+/*
+ * CaYaDev design tokens.
+ *
+ * Values are lifted verbatim from cayadev.com (css/style.css and
+ * css/home-redesign.css) so the hub reads as part of the same family.
+ * Do not hand-tune these — if the site palette changes, re-sync from source.
+ */
+
+:root {
+  /* Brand red */
+  --primary: #dc2626;
+  --primary-dark: #b91c1c;
+  --primary-light: #ef4444;
+  --primary-glow: rgba(220, 38, 38, 0.15);
+  --primary-glow-strong: rgba(220, 38, 38, 0.35);
+  --primary-deep: #7f1d1d;
+
+  /* Surfaces — darkest to lightest */
+  --ink-0: #07090f;
+  --ink-1: #0b1020;
+  --ink-2: #121a30;
+  --bg: #111826;
+  --bg-medium: #172234;
+  --bg-light: #223149;
+  --card-bg: #182438;
+  --glass-bg: rgba(17, 24, 38, 0.72);
+
+  /* Text */
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #7d869a;
+
+  /* Lines */
+  --border: rgba(148, 163, 184, 0.15);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --glass-border: rgba(148, 163, 184, 0.1);
+
+  /* Semantic — sampled from the site's terminal block */
+  --ok: #5fe39d;
+  --ok-deep: #16a34a;
+  --info: #4cc2ff;
+  --warn: #f5b942;
+  --danger: #ff7a7a;
+  --danger-deep: #dc3545;
+
+  /* Typography */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "JetBrains Mono", "Fira Code",
+    "SF Mono", Menlo, Consolas, ui-monospace, monospace;
+
+  /* Shape & motion */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-lg: 16px;
+  --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.35), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layout */
+  --nav-height: 58px;
+  --sidebar-width: 264px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+/* Scrollbars styled to match the dark surfaces rather than the OS default. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-light);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2d3f5c;
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary-light);
+  outline-offset: 2px;
+}
