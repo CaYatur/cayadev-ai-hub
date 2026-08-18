@@ -295,14 +295,23 @@ impl OllamaClient {
 
             let chunk = match next {
                 Err(_) => {
-                    let _ = tx
-                        .send(StreamEvent::Error {
-                            message: format!(
-                                "No output for {budget}s. The model may be loading or the \
-                                 request may exceed available memory."
-                            ),
-                        })
-                        .await;
+                    // The two cases want different advice. Nothing at all means
+                    // the weights are still being loaded, or do not fit; a gap
+                    // part-way through means they fit badly and are being paged.
+                    let message = if seen_any {
+                        format!(
+                            "The reply stopped after {budget}s with nothing further. \
+                             A model larger than the graphics card pages its weights \
+                             in and out mid-reply; a smaller one will not."
+                        )
+                    } else {
+                        format!(
+                            "Nothing back after {budget}s. The model is still loading, \
+                             or it does not fit in this machine's VRAM and is running \
+                             from system memory."
+                        )
+                    };
+                    let _ = tx.send(StreamEvent::Error { message }).await;
                     return Err(OllamaError::Stalled { seconds: budget, model });
                 }
                 Ok(None) => break,

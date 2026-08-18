@@ -32,6 +32,15 @@ use crate::ollama::types::Message;
 /// model no room to answer, which reads as a stall.
 const OCCUPANCY: f64 = 0.65;
 
+/// What the conversation is trimmed *down* to, once it has to be trimmed.
+///
+/// Not the same number as [`OCCUPANCY`], deliberately. Trimming to exactly the
+/// threshold means the next step crosses it again and trims again, so every
+/// single step changes the messages behind the system prompt and the daemon
+/// throws away its KV cache each time. Cutting well under the line buys several
+/// steps that only append, and appending is what the cache is built for.
+const TARGET: f64 = 0.45;
+
 /// Exchanges at the end that are never dropped.
 ///
 /// One step is an assistant turn plus its tool result, so six messages is
@@ -77,11 +86,12 @@ pub struct Trim {
 /// survives regardless of how old it gets — without that, a long run drops the
 /// thing it is trying to do and the model starts improvising.
 pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize) -> Trim {
-    let budget = (num_ctx as f64 * OCCUPANCY) as usize;
+    let ceiling = (num_ctx as f64 * OCCUPANCY) as usize;
     let mut task = task.min(messages.len().saturating_sub(1));
-    if total_tokens(messages) <= budget {
+    if total_tokens(messages) <= ceiling {
         return Trim { dropped: 0, task };
     }
+    let budget = (num_ctx as f64 * TARGET) as usize;
 
     // The system prompt states how to behave; everything after it is
     // conversation and can go, except the instruction and the recent tail.
@@ -177,6 +187,24 @@ mod tests {
             "still over budget: {}",
             total_tokens(&messages)
         );
+    }
+
+    #[test]
+    fn trimming_leaves_room_to_grow_before_the_next_trim() {
+        // Cutting to exactly the threshold would trim again on the very next
+        // step, and a conversation that changes behind the system prompt every
+        // step is a KV cache thrown away every step.
+        let mut messages = convo(40, 2_000);
+        let mut trim = fit(&mut messages, 8192, 1);
+        assert!(trim.dropped > 0);
+
+        // Several more steps of ordinary size must fit without another trim.
+        for i in 0..3 {
+            messages.push(Message::assistant(format!("later {i}")));
+            messages.push(Message::tool_result("read_file", "z".repeat(1_000)));
+            trim = fit(&mut messages, 8192, trim.task);
+            assert_eq!(trim.dropped, 0, "trimmed again after only {i} more steps");
+        }
     }
 
     #[test]
