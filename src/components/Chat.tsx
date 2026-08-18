@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, type ModelProfile, type PermissionMode, type ProposedCall } from "../lib/agent";
+import type { ModelProfile, PermissionMode, ProposedCall } from "../lib/agent";
 import {
   formatElapsed,
   formatTokens,
@@ -56,23 +56,33 @@ export default function Chat({
   models,
   running,
   pending,
+  mode,
+  assisted,
   onSend,
   onAnswer,
   onWorkspace,
   onCancel,
+  onMode,
+  onAssisted,
 }: {
   session: Session;
   models: ModelProfile[];
   running: boolean;
   pending: ProposedCall | null;
+  /// Owned by `App` so it survives unmounting this view. Local state here
+  /// would reset the label to the default while the engine kept the old mode
+  /// — and a stale "Project auto" label over a live Unrestricted engine is
+  /// the one divergence that can cost the user something.
+  mode: PermissionMode;
+  assisted: boolean;
   onSend: (text: string, model?: string) => void;
   onAnswer: (approved: boolean) => void;
   onWorkspace: (path: string) => void;
   onCancel: () => void;
+  onMode: (mode: PermissionMode) => void;
+  onAssisted: (enabled: boolean) => void;
 }) {
   const [prompt, setPrompt] = useState("");
-  const [mode, setMode] = useState<PermissionMode>("project_auto");
-  const [assisted, setAssisted] = useState(true);
   const [model, setModel] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
@@ -88,7 +98,7 @@ export default function Chat({
     if (typeof chosen === "string") onWorkspace(chosen);
   }
 
-  async function changeMode(next: PermissionMode) {
+  function changeMode(next: PermissionMode) {
     // The one mode that can damage things outside the project takes a
     // deliberate confirmation, not a single click in a dropdown.
     if (next === "unrestricted") {
@@ -98,8 +108,7 @@ export default function Chat({
       );
       if (!ok) return;
     }
-    setMode(next);
-    await api.setMode(next);
+    onMode(next);
   }
 
   function send() {
@@ -159,10 +168,7 @@ export default function Chat({
             <input
               type="checkbox"
               checked={assisted}
-              onChange={async (e) => {
-                setAssisted(e.target.checked);
-                await api.setAssisted(e.target.checked);
-              }}
+              onChange={(e) => onAssisted(e.target.checked)}
             />
             <span>Assisted approval</span>
           </label>

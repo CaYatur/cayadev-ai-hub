@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Chat from "./components/Chat";
 import Models from "./components/Models";
 import Sidebar from "./components/Sidebar";
-import { api, subscribe, type AgentEvent, type ModelProfile, type ProposedCall } from "./lib/agent";
+import {
+  api,
+  subscribe,
+  type AgentEvent,
+  type ModelProfile,
+  type PermissionMode,
+  type ProposedCall,
+} from "./lib/agent";
 import {
   applyMetrics,
   load,
@@ -28,6 +35,10 @@ export default function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [pending, setPending] = useState<ProposedCall | null>(null);
+  // Permission state lives here, not in `Chat`, so switching to the Models
+  // view and back cannot show a mode the engine is not actually in.
+  const [mode, setModeState] = useState<PermissionMode>("project_auto");
+  const [assisted, setAssistedState] = useState(true);
 
   // The event stream is global, so handlers need the current session id without
   // being torn down and resubscribed on every switch.
@@ -149,10 +160,31 @@ export default function App() {
     [active, patch, append],
   );
 
+  const changeMode = useCallback(async (next: PermissionMode) => {
+    setModeState(next);
+    await api.setMode(next);
+  }, []);
+
+  const changeAssisted = useCallback(async (enabled: boolean) => {
+    setAssistedState(enabled);
+    await api.setAssisted(enabled);
+  }, []);
+
   const send = useCallback(
     async (text: string, model?: string) => {
       if (!active) return;
       const id = active.id;
+
+      // Sessions each remember a folder, but the engine holds only one. Re-assert
+      // it here so a run always uses the folder the header is showing.
+      if (active.workspace) {
+        try {
+          await api.setWorkspace(active.workspace);
+        } catch (e) {
+          append(id, { kind: "notice", text: String(e), tone: "error" });
+          return;
+        }
+      }
 
       patch(id, (s) => ({
         ...s,
@@ -241,10 +273,14 @@ export default function App() {
             models={models}
             running={running}
             pending={pending}
+            mode={mode}
+            assisted={assisted}
             onSend={send}
             onAnswer={answer}
             onWorkspace={setWorkspace}
             onCancel={cancel}
+            onMode={changeMode}
+            onAssisted={changeAssisted}
           />
         ) : (
           <main className="content">

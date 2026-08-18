@@ -70,9 +70,14 @@ everything else is not built yet, however well specified it looks.
 - Injection tests assert a hostile payload produces byte-identical input
 
 ### Desktop UI
-- Streaming chat, per-call tool cards, approve/reject bar
-- Notes when the parser rescued a malformed call
-- Permission-mode selector with a typed confirmation for Unrestricted
+- Session sidebar grouped by age, persisted locally; a session takes its title
+  from the first instruction and carries the workspace forward
+- Tool calls collapsed to one scannable line, expandable on demand, with
+  refused and rejected calls struck through
+- A "rescued" flag when the tolerant parser had to recover a malformed call
+- Status line: elapsed, tokens, live decode rate, active permission mode, Stop
+- Streaming chat, approve/reject bar, permission-mode selector with a typed
+  confirmation for Unrestricted
 - Model list with placement, routing table, GPU re-read
 
 ### GPU probing — `src-tauri/src/ollama/gpu.rs`
@@ -93,9 +98,11 @@ everything else is not built yet, however well specified it looks.
   Use git.
 - **Windows-only testing.** Nothing is deliberately platform-specific, but the
   path and command tests have only been exercised on Windows.
-- **The UI has not been driven by hand end to end.** The Rust layer is covered
-  by live tests and the frontend typechecks with command and event names
-  cross-checked against Rust, but no one has clicked through a full session.
+- **The UI has not been driven by hand end to end, and its appearance is
+  unverified.** The Rust layer is covered by live tests; the frontend
+  typechecks, its command and event names are cross-checked against Rust, and
+  its rendered structure was inspected in a browser. Nobody has clicked through
+  a full session, and no one has looked at the pixels.
 
 ## Next
 
