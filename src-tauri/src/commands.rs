@@ -178,6 +178,8 @@ pub async fn run_agent(
     state: State<'_, AppState>,
     prompt: String,
     model: Option<String>,
+    num_ctx: Option<u32>,
+    effort: Option<Effort>,
 ) -> Result<String, String> {
     let workspace = state
         .workspace
@@ -197,10 +199,21 @@ pub async fn run_agent(
         .or_else(|| policy.get(TaskClass::Coding).map(str::to_string))
         .ok_or("No model available for coding tasks.")?;
 
-    let params = profiles
-        .iter()
-        .find(|p| p.name == chosen)
-        .and_then(|p| p.params_billions());
+    let profile = profiles.iter().find(|p| p.name == chosen);
+    let params = profile.and_then(|p| p.params_billions());
+
+    // Fall back to what the registry computed for this model rather than a
+    // constant: `recommended_context` is the largest window that still leaves
+    // the model resident in VRAM.
+    let context = num_ctx
+        .or_else(|| profile.and_then(|p| p.recommended_context).map(|c| c as u32))
+        .unwrap_or(8192);
+
+    let effort = effort.unwrap_or_default();
+    // Thinking is only meaningful where the model advertises it; forcing it on
+    // a model without the capability wastes tokens and confuses the parser.
+    let think = effort.wants_thinking()
+        && profile.map(|p| p.capabilities.thinking).unwrap_or(false);
 
     let classifier = policy.get(TaskClass::Classify).map(str::to_string);
     let assisted = *state.assisted_approval.read().await;
@@ -213,8 +226,10 @@ pub async fn run_agent(
         perms,
         RunConfig {
             model: chosen.clone(),
-            num_ctx: Some(8192),
+            num_ctx: Some(context),
             params_billions: params,
+            think,
+            max_steps: effort.max_steps(),
             ..Default::default()
         },
     );
@@ -239,4 +254,69 @@ pub async fn run_agent(
     let _ = pump.await;
 
     Ok(format!("{reason:?}"))
+}
+
+/// How much the agent should spend on a task.
+///
+/// Maps to real levers rather than a vague dial: whether to let a
+/// thinking-capable model reason before answering, and how many tool steps it
+/// may take before the run is cut off. Both change wall-clock time
+/// substantially on a local model, which is the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effort {
+    /// No thinking, short leash. For edits and lookups.
+    Fast,
+    #[default]
+    Balanced,
+    /// Thinking on where supported, long leash. For debugging and design.
+    Thorough,
+}
+
+impl Effort {
+    pub fn wants_thinking(self) -> bool {
+        matches!(self, Self::Thorough)
+    }
+
+    pub fn max_steps(self) -> usize {
+        match self {
+            Self::Fast => 8,
+            Self::Balanced => 24,
+            Self::Thorough => 48,
+        }
+    }
+}
+
+/// Context sizes worth offering for a model, plus what it was trained for.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContextOptions {
+    pub recommended: Option<u64>,
+    pub trained_max: Option<u64>,
+    /// Steps the UI offers, capped at the trained maximum.
+    pub choices: Vec<u64>,
+}
+
+/// What context sizes this model can be run at.
+#[tauri::command]
+pub async fn context_options(
+    state: State<'_, AppState>,
+    model: String,
+) -> Result<ContextOptions, String> {
+    let profiles = state.profiles.read().await;
+    let profile = profiles
+        .iter()
+        .find(|p| p.name == model)
+        .ok_or_else(|| format!("unknown model {model}"))?;
+
+    let ceiling = profile.max_context.unwrap_or(32_768);
+    let choices = [2_048u64, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144]
+        .into_iter()
+        .filter(|c| *c <= ceiling)
+        .collect();
+
+    Ok(ContextOptions {
+        recommended: profile.recommended_context,
+        trained_max: profile.max_context,
+        choices,
+    })
 }

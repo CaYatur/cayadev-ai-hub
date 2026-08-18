@@ -22,6 +22,15 @@ export type ModelProfile = {
 
 export type PermissionMode = "read_only" | "project_auto" | "balanced" | "unrestricted";
 
+/** Maps to real levers: thinking on/off and how many tool steps are allowed. */
+export type Effort = "fast" | "balanced" | "thorough";
+
+export type ContextOptions = {
+  recommended: number | null;
+  trained_max: number | null;
+  choices: number[];
+};
+
 export type Decision = "allow" | "ask" | "deny";
 export type Outcome =
   | "auto_approved"
@@ -82,7 +91,9 @@ export const api = {
   resolveApproval: (id: string, approved: boolean) =>
     invoke<boolean>("resolve_approval", { id, approved }),
   cancel: () => invoke<void>("cancel_run"),
-  run: (prompt: string, model?: string) => invoke<string>("run_agent", { prompt, model }),
+  run: (prompt: string, model?: string, numCtx?: number, effort?: Effort) =>
+    invoke<string>("run_agent", { prompt, model, numCtx, effort }),
+  contextOptions: (model: string) => invoke<ContextOptions>("context_options", { model }),
 };
 
 /** Subscribe to run events and approval questions. */

@@ -3,7 +3,7 @@ import type { Metrics, Outcome, ProposedCall, Recovery } from "./agent";
 /// One line in a conversation. Tool calls are entries, not annotations on a
 /// message, because the user needs to scan and expand them independently.
 export type Entry =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; at?: number }
   | { kind: "assistant"; text: string }
   | {
       kind: "tool";
@@ -23,6 +23,9 @@ export type Session = {
   tokens: number;
   elapsedMs: number;
   lastRate: number | null;
+  /// Tokens occupying the model's window right now, from the last step's
+  /// prompt evaluation. Distinct from `tokens`, which is cumulative usage.
+  contextUsed: number;
 };
 
 const STORAGE_KEY = "cayahub.sessions.v1";
@@ -39,6 +42,7 @@ export function newSession(workspace: string | null = null): Session {
     tokens: 0,
     elapsedMs: 0,
     lastRate: null,
+    contextUsed: 0,
   };
 }
 
@@ -80,6 +84,18 @@ export function formatElapsed(ms: number): string {
   const seconds = total % 60;
   if (minutes < 60) return `${minutes}m ${seconds}s`;
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/// Relative time in the short form a message footer wants.
+export function formatAgo(at?: number): string {
+  if (!at) return "";
+  const seconds = Math.floor((Date.now() - at) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 export function formatTokens(n: number): string {
@@ -142,5 +158,9 @@ export function applyMetrics(session: Session, metrics: Metrics): Session {
     tokens: session.tokens + metrics.prompt_tokens + metrics.output_tokens,
     elapsedMs: session.elapsedMs + metrics.total_seconds * 1000,
     lastRate: metrics.decode_tps,
+    // What the window actually holds after this step. Ollama reports the full
+    // prompt length even when it reuses the KV prefix, which is exactly the
+    // number an occupancy meter wants.
+    contextUsed: metrics.prompt_tokens + metrics.output_tokens,
   };
 }

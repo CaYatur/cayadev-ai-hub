@@ -6,6 +6,7 @@ import {
   api,
   subscribe,
   type AgentEvent,
+  type Effort,
   type ModelProfile,
   type PermissionMode,
   type ProposedCall,
@@ -35,13 +36,19 @@ export default function App() {
   const [version, setVersion] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [pending, setPending] = useState<ProposedCall | null>(null);
-  // Permission state lives here, not in `Chat`, so switching to the Models
-  // view and back cannot show a mode the engine is not actually in.
+
+  // Run settings live here, not in `Chat`. `Chat` unmounts when the Models view
+  // is shown, and local state there would silently revert to defaults while the
+  // engine kept the old value — which for permission mode means a safe-looking
+  // label over an unrestricted engine.
   const [mode, setModeState] = useState<PermissionMode>("project_auto");
   const [assisted, setAssistedState] = useState(true);
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState<Effort>("balanced");
+  const [numCtx, setNumCtx] = useState<number | null>(null);
 
   // The event stream is global, so handlers need the current session id without
-  // being torn down and resubscribed on every switch.
+  // resubscribing on every switch.
   const activeRef = useRef<string | null>(null);
   useEffect(() => {
     activeRef.current = activeId ?? sessions[0]?.id ?? null;
@@ -85,6 +92,7 @@ export default function App() {
 
   useEffect(() => {
     let off: (() => void) | undefined;
+    let cancelled = false;
 
     subscribe(
       (event: AgentEvent) => {
@@ -133,18 +141,30 @@ export default function App() {
             break;
 
           case "done":
-            if (event.reason !== "Completed") {
-              append(id, { kind: "notice", text: `Stopped: ${event.reason}`, tone: "info" });
+            // `StopReason` serialises snake_case, so compare in that case.
+            if (event.reason !== "completed") {
+              append(id, {
+                kind: "notice",
+                text: `Stopped: ${event.reason.replace(/_/g, " ")}`,
+                tone: "info",
+              });
             }
             break;
         }
       },
       (call) => setPending(call),
     ).then((fn) => {
-      off = fn;
+      // The subscription resolves asynchronously, so a cleanup that ran first
+      // would leave this listener attached forever — and every event would then
+      // be handled twice, duplicating text and tool rows.
+      if (cancelled) fn();
+      else off = fn;
     });
 
-    return () => off?.();
+    return () => {
+      cancelled = true;
+      off?.();
+    };
   }, [append, patch]);
 
   const setWorkspace = useCallback(
@@ -170,13 +190,11 @@ export default function App() {
     await api.setAssisted(enabled);
   }, []);
 
-  const send = useCallback(
-    async (text: string, model?: string) => {
+  const run = useCallback(
+    async (id: string, text: string) => {
       if (!active) return;
-      const id = active.id;
-
-      // Sessions each remember a folder, but the engine holds only one. Re-assert
-      // it here so a run always uses the folder the header is showing.
+      // Sessions each remember a folder but the engine holds one; re-assert it
+      // so a run always uses the folder the header is showing.
       if (active.workspace) {
         try {
           await api.setWorkspace(active.workspace);
@@ -185,15 +203,9 @@ export default function App() {
           return;
         }
       }
-
-      patch(id, (s) => ({
-        ...s,
-        title: s.entries.length === 0 ? titleFrom(text) : s.title,
-        entries: [...s.entries, { kind: "user", text }],
-      }));
       setRunning(true);
       try {
-        await api.run(text, model);
+        await api.run(text, model || undefined, numCtx ?? undefined, effort);
       } catch (e) {
         append(id, { kind: "notice", text: String(e), tone: "error" });
       } finally {
@@ -201,7 +213,63 @@ export default function App() {
         setPending(null);
       }
     },
-    [active, patch, append],
+    [active, append, model, numCtx, effort],
+  );
+
+  const send = useCallback(
+    async (text: string) => {
+      if (!active) return;
+      const id = active.id;
+      patch(id, (s) => ({
+        ...s,
+        title: s.entries.length === 0 ? titleFrom(text) : s.title,
+        entries: [...s.entries, { kind: "user", text, at: Date.now() }],
+      }));
+      await run(id, text);
+    },
+    [active, patch, run],
+  );
+
+  /// Re-run a user turn, discarding everything that followed it.
+  const retry = useCallback(
+    async (index: number) => {
+      if (!active || running) return;
+      const id = active.id;
+      const entry = active.entries[index];
+      if (entry?.kind !== "user") return;
+
+      patch(id, (s) => ({ ...s, entries: s.entries.slice(0, index + 1) }));
+      await run(id, entry.text);
+    },
+    [active, running, patch, run],
+  );
+
+  /// Drop a user turn and everything it produced.
+  const removeFrom = useCallback(
+    (index: number) => {
+      if (!active) return;
+      patch(active.id, (s) => ({ ...s, entries: s.entries.filter((_, i) => i < index) }));
+    },
+    [active, patch],
+  );
+
+  /// Copy a turn to the clipboard.
+  const copy = useCallback((text: string) => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }, []);
+
+  /// Continue from a turn in a new session, leaving this one intact.
+  const branch = useCallback(
+    (index: number) => {
+      if (!active) return;
+      const created = newSession(active.workspace);
+      created.entries = active.entries.slice(0, index + 1);
+      const first = created.entries.find((e) => e.kind === "user");
+      created.title = first && first.kind === "user" ? titleFrom(first.text) : "Branch";
+      setSessions((prev) => [created, ...prev]);
+      setActiveId(created.id);
+    },
+    [active],
   );
 
   const answer = useCallback(
@@ -226,16 +294,13 @@ export default function App() {
     setView("chat");
   }, [active]);
 
-  const deleteSession = useCallback(
-    (id: string) => {
-      setSessions((prev) => {
-        const next = prev.filter((s) => s.id !== id);
-        return next.length > 0 ? next : [newSession()];
-      });
-      setActiveId((current) => (current === id ? null : current));
-    },
-    [],
-  );
+  const deleteSession = useCallback((id: string) => {
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== id);
+      return next.length > 0 ? next : [newSession()];
+    });
+    setActiveId((current) => (current === id ? null : current));
+  }, []);
 
   return (
     <div className="shell">
@@ -271,23 +336,38 @@ export default function App() {
           <Chat
             session={active}
             models={models}
+            routing={routing}
             running={running}
             pending={pending}
             mode={mode}
             assisted={assisted}
+            model={model}
+            effort={effort}
+            numCtx={numCtx}
             onSend={send}
             onAnswer={answer}
             onWorkspace={setWorkspace}
             onCancel={cancel}
             onMode={changeMode}
             onAssisted={changeAssisted}
+            onModel={setModel}
+            onEffort={setEffort}
+            onNumCtx={setNumCtx}
+            onRetry={retry}
+            onRemove={removeFrom}
+            onCopy={copy}
+            onBranch={branch}
           />
         ) : (
           <main className="content">
-            <Models models={models} routing={routing} onRefreshVram={async () => {
-              await api.refreshVram();
-              await loadModels();
-            }} />
+            <Models
+              models={models}
+              routing={routing}
+              onRefreshVram={async () => {
+                await api.refreshVram();
+                await loadModels();
+              }}
+            />
           </main>
         )}
       </div>
