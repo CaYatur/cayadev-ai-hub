@@ -1,3 +1,78 @@
+# v0.2.1 — a slow model is not a broken one
+
+Four fixes from real use, three of them the same mistake in different places:
+treating "this is taking a long time" as "this has failed".
+
+## A big model writing a file was being killed
+
+Asked for a single-file HTML page, `qwen3.8:27b` failed twice and lost the work
+both times. Measuring the stream said why: the model streams its reasoning
+normally, then sends **nothing at all for 547 seconds**, and finally delivers the
+whole tool call in one chunk. Its template does not stream a tool call — it
+buffers it. On a model running from system RAM at 5 tok/s, writing a long file
+is nine minutes of complete silence, and the fixed 180-second budget read that
+as a stall.
+
+The budget is now sized to the model, and the unit is work rather than time:
+enough silence to produce four thousand tokens at whatever rate this model
+actually manages. A resident 7B keeps its three minutes — three minutes of
+nothing from a 42 tok/s model really is broken. A spilled 27B gets a quarter of
+an hour.
+
+That rate is measured, not assumed. Every step reports one; the fastest from a
+run is kept on the model and carried across a refresh, so from the second run
+onwards the budget is against what this machine really does.
+
+And waiting in silence no longer looks like hanging. The wait reports itself
+every ten seconds, and the status line says which it is — the model loading, or
+the model writing something it will not send until it is finished.
+
+**Verified on the case that failed:** three steps, 199 lines written, 431
+seconds, with a 340-second silence shown while it happened.
+
+## "The vision model returned nothing"
+
+Asked what was on screen, the agent captured it, got nothing back, and fell
+back to listing window titles with PowerShell. Two causes, both measured:
+
+- Vision was routed to the **largest** model that could see. Once a big model is
+  loaded nothing else fits, so every vision model reads as spilled and "largest"
+  picked the 17.7 GB one — **249 seconds** to read one screenshot against **16**
+  for a 6 GB one. Vision now takes the *smallest* well-placed model; size buys
+  nothing for reading a picture.
+- The describing call left reasoning on, so a thinking model spent its whole
+  reply budget reasoning and returned empty content. Reasoning is now off, the
+  budget is large enough to answer, and if a model reasons anyway its reasoning
+  is returned rather than thrown away.
+
+A model that can see now reads its own screenshots — routing elsewhere is only
+for models that cannot see at all.
+
+## Screenshots covered one monitor
+
+`PrimaryScreen` on a two-monitor desk returns a confident description of the
+wrong screen, which is worse than an error. Capture now spans the whole virtual
+desktop, including displays left of or above the primary one, and is scaled to
+1920px before being sent — two 2560-wide screens is megabytes of base64 that no
+model reads at full resolution.
+
+## The instruction box was a two-line slot
+
+It now grows upward as the instruction does, to about twelve lines, then stops
+and scrolls.
+
+## Also
+
+The README has screenshots, rendered by `scripts/demo/` from the real components
+over an example transcript — so a picture of the app cannot drift from the app.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
+---
+
 # v0.2.0 — the things that broke in real use
 
 v0.1.0 was measured against benchmarks. This one is measured against a week of
