@@ -8,6 +8,7 @@ pub mod agent;
 pub mod commands;
 pub mod ollama;
 pub mod perms;
+pub mod session;
 pub mod tools;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -27,6 +28,13 @@ pub fn run() {
             commands::list_models,
             commands::routing_policy,
             commands::set_vram_budget,
+            commands::refresh_vram_budget,
+            commands::set_workspace,
+            commands::set_permission_mode,
+            commands::set_assisted_approval,
+            commands::resolve_approval,
+            commands::cancel_run,
+            commands::run_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

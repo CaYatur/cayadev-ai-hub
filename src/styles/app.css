@@ -230,3 +230,332 @@
   font-size: 12px;
   color: var(--primary-light);
 }
+
+/* ------------------------------------------------------------------ tabs */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-medium);
+}
+
+.tab-active,
+.tab-active:hover {
+  color: var(--primary-light);
+  background: var(--primary-glow);
+}
+
+/* --------------------------------------------------------------- controls */
+
+.btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #2b3c58;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-light);
+  border-color: var(--primary-light);
+}
+
+.btn-ghost {
+  background: transparent;
+}
+
+.select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-light);
+  color: var(--text-primary);
+  cursor: pointer;
+  max-width: 190px;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ chat */
+
+.chat {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.chat-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-medium);
+  flex-wrap: wrap;
+}
+
+.chat-path {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the tail of a long path visible */
+  text-align: left;
+}
+
+.rate {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ok);
+}
+
+.danger-banner {
+  flex: 0 0 auto;
+  padding: 8px 20px;
+  background: var(--primary-glow-strong);
+  border-bottom: 1px solid var(--primary);
+  color: #ffd9d9;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.transcript {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.msg {
+  max-width: 78ch;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg-user {
+  align-self: flex-end;
+  background: var(--primary);
+  color: #fff;
+}
+
+.msg-assistant {
+  align-self: flex-start;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+}
+
+.notice {
+  align-self: center;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 999px;
+}
+
+.notice-info {
+  color: var(--text-muted);
+  background: var(--bg-medium);
+}
+
+.notice-error {
+  color: var(--danger);
+  background: var(--primary-glow);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+}
+
+/* ------------------------------------------------------------- tool cards */
+
+.toolcard {
+  align-self: flex-start;
+  max-width: 78ch;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-faint);
+  border-radius: var(--radius);
+  background: var(--ink-1);
+  padding: 10px 14px;
+  font-size: 12.5px;
+}
+
+.tool-waiting { border-left-color: var(--warn); }
+.tool-auto_approved { border-left-color: var(--ok); }
+.tool-user_approved { border-left-color: var(--ok); }
+.tool-user_rejected { border-left-color: var(--text-faint); }
+.tool-denied { border-left-color: var(--primary); }
+.tool-failed { border-left-color: var(--warn); }
+
+.toolcard-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.toolcard-head code {
+  color: var(--info);
+  font-weight: 600;
+}
+
+.tool-outcome {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.toolcard-args,
+.toolcard-output,
+.approval-args {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--ink-0);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.toolcard-output {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Shown only when the parser had to rescue a malformed call. */
+.recovery {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+/* -------------------------------------------------------------- approval */
+
+.approval {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--primary);
+  background: var(--primary-glow);
+}
+
+.approval-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.approval-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.approval-title code {
+  color: var(--info);
+}
+
+.approval-reason {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* -------------------------------------------------------------- composer */
+
+.composer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-medium);
+}
+
+.input {
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 13.5px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--ink-1);
+  color: var(--text-primary);
+  resize: vertical;
+  min-height: 44px;
+}
+
+.input:disabled {
+  opacity: 0.6;
+}

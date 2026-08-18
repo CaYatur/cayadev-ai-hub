@@ -1,9 +1,11 @@
 //! Ollama integration: wire types, HTTP client, and the model registry.
 
 pub mod client;
+pub mod gpu;
 pub mod registry;
 pub mod types;
 
+pub use gpu::probe as probe_vram;
 pub use client::{OllamaClient, OllamaError, StreamEvent, Timeouts};
 pub use registry::{
     load_profiles, Capabilities, ModelProfile, Placement, RoutingPolicy, TaskClass, VramBudget,

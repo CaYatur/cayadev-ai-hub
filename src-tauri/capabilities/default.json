@@ -5,6 +5,11 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "dialog:allow-open",
+    "os:default",
+    "clipboard-manager:allow-write-text",
+    "store:default",
+    "process:default"
   ]
 }

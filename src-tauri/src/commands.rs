@@ -13,8 +13,17 @@
 //!   the hybrid-attention KV correction. Duplicating that in TypeScript means
 //!   two implementations that drift.
 
-use tauri::State;
-use tokio::sync::RwLock;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::{Mutex, RwLock};
+
+use crate::agent::runner::{AgentEvent, AgentRunner, RunConfig, StopReason};
+use crate::ollama::TaskClass;
+use crate::perms::{Outcome, PermissionEngine, PermissionMode};
+use crate::session::{self, PendingApprovals};
+use crate::tools::WorkspaceTools;
 
 use crate::ollama::{
     load_profiles, ModelProfile, OllamaClient, RoutingPolicy, Timeouts, VramBudget, DEFAULT_HOST,
@@ -24,14 +33,28 @@ pub struct AppState {
     pub client: OllamaClient,
     pub budget: RwLock<VramBudget>,
     pub profiles: RwLock<Vec<ModelProfile>>,
+    /// Root the agent is confined to.
+    pub workspace: RwLock<Option<PathBuf>>,
+    pub mode: RwLock<PermissionMode>,
+    /// Whether the classifier may settle escalated calls.
+    pub assisted_approval: RwLock<bool>,
+    pub pending: PendingApprovals,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        // Read the real budget from the driver. The default is only a
+        // fallback for hosts with no supported GPU tool, and it is a guess
+        // pessimistic enough to have caused a wrong routing decision.
+        let budget = crate::ollama::probe_vram().unwrap_or_default();
         Self {
             client: OllamaClient::new(DEFAULT_HOST, Timeouts::default()),
-            budget: RwLock::new(VramBudget::default()),
+            budget: RwLock::new(budget),
             profiles: RwLock::new(Vec::new()),
+            workspace: RwLock::new(None),
+            mode: RwLock::new(PermissionMode::default()),
+            assisted_approval: RwLock::new(true),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -78,4 +101,142 @@ pub async fn set_vram_budget(
 ) -> Result<(), String> {
     *state.budget.write().await = VramBudget { total_bytes, reserved_bytes };
     Ok(())
+}
+
+/// Re-read GPU memory from the driver and adopt it as the budget.
+///
+/// Worth calling when the user closes a game or a browser: available VRAM
+/// changes, and with it which models are worth routing to.
+#[tauri::command]
+pub async fn refresh_vram_budget(state: State<'_, AppState>) -> Result<VramBudget, String> {
+    let probed = crate::ollama::probe_vram()
+        .ok_or("no supported GPU found; set the budget manually")?;
+    *state.budget.write().await = probed;
+    Ok(probed)
+}
+
+// ---------------------------------------------------------------------------
+// Session control
+// ---------------------------------------------------------------------------
+
+/// Point the agent at a directory. Everything it does is confined to this root.
+#[tauri::command]
+pub async fn set_workspace(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let path = PathBuf::from(path);
+    if !path.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    let canonical = path.canonicalize().unwrap_or(path);
+    let normalized = crate::perms::normalize(&canonical);
+    *state.workspace.write().await = Some(normalized.clone());
+    Ok(normalized.display().to_string())
+}
+
+#[tauri::command]
+pub async fn set_permission_mode(
+    state: State<'_, AppState>,
+    mode: PermissionMode,
+) -> Result<(), String> {
+    *state.mode.write().await = mode;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_assisted_approval(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    *state.assisted_approval.write().await = enabled;
+    Ok(())
+}
+
+/// Answer a call the agent asked about.
+#[tauri::command]
+pub async fn resolve_approval(
+    state: State<'_, AppState>,
+    id: String,
+    approved: bool,
+) -> Result<bool, String> {
+    let outcome = if approved { Outcome::UserApproved } else { Outcome::UserRejected };
+    Ok(session::resolve(&state.pending, &id, outcome).await)
+}
+
+/// Refuse everything still waiting, ending the current run's questions.
+#[tauri::command]
+pub async fn cancel_run(state: State<'_, AppState>) -> Result<(), String> {
+    session::reject_all(&state.pending).await;
+    Ok(())
+}
+
+/// Run the agent on one instruction, streaming events to the frontend.
+///
+/// Events arrive on the `agent://event` channel; approval questions on
+/// `agent://approval`.
+#[tauri::command]
+pub async fn run_agent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    prompt: String,
+    model: Option<String>,
+) -> Result<String, String> {
+    let workspace = state
+        .workspace
+        .read()
+        .await
+        .clone()
+        .ok_or("No workspace selected. Choose a folder first.")?;
+
+    let profiles = state.profiles.read().await.clone();
+    if profiles.is_empty() {
+        return Err("No models loaded. Refresh the model list first.".into());
+    }
+    let policy = RoutingPolicy::derive(&profiles);
+
+    // An explicit choice wins; otherwise routing picks the coding model.
+    let chosen = model
+        .or_else(|| policy.get(TaskClass::Coding).map(str::to_string))
+        .ok_or("No model available for coding tasks.")?;
+
+    let params = profiles
+        .iter()
+        .find(|p| p.name == chosen)
+        .and_then(|p| p.params_billions());
+
+    let classifier = policy.get(TaskClass::Classify).map(str::to_string);
+    let assisted = *state.assisted_approval.read().await;
+    let mode = *state.mode.read().await;
+
+    let tools = WorkspaceTools::new(&workspace);
+    let perms = PermissionEngine::new(&workspace, mode);
+    let runner = AgentRunner::new(
+        state.client.clone(),
+        perms,
+        RunConfig {
+            model: chosen.clone(),
+            num_ctx: Some(8192),
+            params_billions: params,
+            ..Default::default()
+        },
+    );
+
+    let gate = session::build_gate(
+        app.clone(),
+        state.pending.clone(),
+        state.client.clone(),
+        classifier,
+        assisted,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let emitter = app.clone();
+    let pump = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let _ = emitter.emit("agent://event", &event);
+        }
+    });
+
+    let reason: StopReason = runner.run(&prompt, &tools, gate.as_ref(), tx).await;
+    let _ = pump.await;
+
+    Ok(format!("{reason:?}"))
 }
