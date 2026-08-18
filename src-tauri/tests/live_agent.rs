@@ -238,7 +238,7 @@ async fn small_models_survive_the_full_tool_surface() {
     std::fs::write(dir.join("note.txt"), "green
 ").unwrap();
 
-    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()), None);
     let advertised = tools.schemas().len();
     println!("
 [surface] {advertised} tools advertised before trimming");
@@ -301,7 +301,7 @@ async fn the_routed_model_still_works_with_the_full_surface() {
     std::fs::write(dir.join("config.txt"), "timeout = 30
 ").unwrap();
 
-    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()), None);
     println!("
 [7b-surface] {} tools before trimming", tools.schemas().len());
 
@@ -475,7 +475,7 @@ async fn a_greeting_does_not_trigger_a_tool() {
     let dir = scratch("greeting");
     std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status().ok();
 
-    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()));
+    let mut tools = WorkspaceTools::new(&dir).with_media(client(), Some("qwen3-vl:8b".into()), None);
     let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
     let runner = AgentRunner::new(
         client(),

@@ -32,7 +32,7 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "Local-first AI agent hub for Ollama",
-    "longDescription": "Run capable, stable coding agents against local Ollama models — including small ones — with task-based model routing, tolerant tool-call parsing, and an auditable permission system.",
+    "longDescription": "Run capable, stable coding agents against local Ollama models \u2014 including small ones \u2014 with task-based model routing, tolerant tool-call parsing, and an auditable permission system.",
     "copyright": "Copyright (c) 2026 CaYatur. MIT licensed.",
     "licenseFile": "../LICENSE",
     "icon": [
@@ -41,6 +41,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "../scripts/extract.py",
+      "../scripts/media.py"
     ]
   }
 }

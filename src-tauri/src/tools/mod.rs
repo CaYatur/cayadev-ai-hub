@@ -80,8 +80,14 @@ impl WorkspaceTools {
         mut self,
         client: crate::ollama::OllamaClient,
         vision_model: Option<String>,
+        resource_dir: Option<PathBuf>,
     ) -> Self {
-        self.media = Some(media::MediaTools::new(&self.workspace, client, vision_model));
+        self.media = Some(media::MediaTools::new(
+            &self.workspace,
+            client,
+            vision_model,
+            resource_dir,
+        ));
         self
     }
 
@@ -724,6 +730,7 @@ mod tests {
                 crate::ollama::Timeouts::default(),
             ),
             Some("qwen3-vl:8b".into()),
+            None,
         )
     }
 

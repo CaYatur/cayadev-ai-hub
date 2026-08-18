@@ -247,6 +247,20 @@ export default function App() {
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   }, []);
 
+  /// Drop every attachment, in the UI and in the engine.
+  ///
+  /// The list is per-session here but global in Rust, where each attachment is
+  /// a permitted root. Without this, a file dropped once stayed readable for
+  /// the rest of the process — across every later session.
+  const resetAttachments = useCallback(async () => {
+    setAttachments([]);
+    try {
+      await api.clearAttachments();
+    } catch {
+      // Nothing to do about a failed cleanup, and it must not block the switch.
+    }
+  }, []);
+
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
@@ -398,25 +412,37 @@ export default function App() {
     setSessions((prev) => [created, ...prev]);
     setActiveId(created.id);
     setView("chat");
-  }, [active]);
+    resetAttachments();
+  }, [active, resetAttachments]);
 
-  const deleteSession = useCallback((id: string) => {
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      return next.length > 0 ? next : [newSession()];
-    });
-    setActiveId((current) => (current === id ? null : current));
-  }, []);
+  const selectSession = useCallback(
+    (id: string) => {
+      if (id === active?.id) return;
+      setActiveId(id);
+      setView("chat");
+      resetAttachments();
+    },
+    [active, resetAttachments],
+  );
+
+  const deleteSession = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        const next = prev.filter((s) => s.id !== id);
+        return next.length > 0 ? next : [newSession()];
+      });
+      setActiveId((current) => (current === id ? null : current));
+      resetAttachments();
+    },
+    [resetAttachments],
+  );
 
   return (
     <div className="shell">
       <Sidebar
         sessions={sessions}
         activeId={active?.id ?? null}
-        onSelect={(id) => {
-          setActiveId(id);
-          setView("chat");
-        }}
+        onSelect={selectSession}
         onNew={startSession}
         onDelete={deleteSession}
         version={version}

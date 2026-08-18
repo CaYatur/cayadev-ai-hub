@@ -240,6 +240,7 @@ pub async fn run_agent(
         .with_media(
             state.client.clone(),
             policy.get(TaskClass::Vision).map(str::to_string),
+            tauri::Manager::path(&app).resource_dir().ok(),
         );
     let mut perms = PermissionEngine::new(&workspace, mode);
     for file in state.attachments.read().await.iter() {

@@ -52,6 +52,13 @@ pub struct MediaTools {
     python: Option<String>,
     /// Interpreter with faster-whisper, for transcription.
     transcriber: Option<String>,
+    /// Where the bundler put the Python sidecars.
+    ///
+    /// A packaged build does not lay resources out beside the executable, so
+    /// guessing from `current_exe` finds nothing — and the tool would have
+    /// advertised itself (Python is installed) and then failed with "no such
+    /// file", which is exactly what the availability checks exist to prevent.
+    resource_dir: Option<PathBuf>,
     /// ffmpeg and ffprobe, for video.
     ffmpeg_available: bool,
     adb_available: bool,
@@ -62,11 +69,13 @@ impl MediaTools {
         workspace: impl Into<PathBuf>,
         client: OllamaClient,
         vision_model: Option<String>,
+        resource_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             workspace: workspace.into(),
             client,
             vision_model,
+            resource_dir,
             python: detect_python(),
             transcriber: detect_transcriber(),
             ffmpeg_available: which("ffmpeg") && which("ffprobe"),
@@ -92,18 +101,29 @@ impl MediaTools {
         crate::perms::normalize(&joined)
     }
 
-    /// Locate a sidecar script, in the source tree or beside the executable.
+    /// Locate a sidecar script.
+    ///
+    /// The bundled copy first, since that is what a released build has; then
+    /// the source tree, so `tauri dev` works; then a bare relative path, which
+    /// fails with a readable message rather than silently doing nothing.
     fn sidecar(&self, name: &str) -> PathBuf {
+        if let Some(dir) = &self.resource_dir {
+            for candidate in [dir.join("scripts").join(name), dir.join(name)] {
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
         let local = self.workspace.join("scripts").join(name);
         if local.exists() {
             return local;
         }
-        // Installed builds keep the sidecar next to the executable.
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("scripts").join(name)))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| PathBuf::from("scripts").join(name))
+        // Running from the repository root during development.
+        let repo = PathBuf::from("scripts").join(name);
+        if repo.exists() {
+            return repo;
+        }
+        PathBuf::from("..").join("scripts").join(name)
     }
 
     /// Ask the vision model to describe an image, returning text.
@@ -559,6 +579,7 @@ mod tests {
             std::env::temp_dir(),
             OllamaClient::new(DEFAULT_HOST, Timeouts::default()),
             vision.map(str::to_string),
+            None,
         )
     }
 
@@ -642,7 +663,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.md"), "# Title\nbody text").unwrap();
 
-        let t = MediaTools::new(&dir, OllamaClient::new(DEFAULT_HOST, Timeouts::default()), None);
+        let t = MediaTools::new(&dir, OllamaClient::new(DEFAULT_HOST, Timeouts::default()), None, None);
         let out = t.execute("read_document", &args(json!({"path": "notes.md"}))).await.unwrap();
         assert!(out.contains("body text"));
         std::fs::remove_dir_all(&dir).ok();
