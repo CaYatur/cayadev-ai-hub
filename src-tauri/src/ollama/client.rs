@@ -92,8 +92,8 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 /// request between every few tokens of a slow model.
 const LIVENESS_AFTER: Duration = Duration::from_secs(60);
 
-/// Seconds between those checks once they start.
-const LIVENESS_EVERY: u64 = 60;
+/// How long between those checks once they start.
+const LIVENESS_EVERY: Duration = Duration::from_secs(60);
 
 impl Timeouts {
     /// Budgets that cover the longest reply this model is allowed to produce.
@@ -384,6 +384,8 @@ impl OllamaClient {
             // app look hung, so the wait is broken into ticks and each one
             // reports how long it has been quiet.
             let silent_since = Instant::now();
+            // When the daemon was last asked whether it still has the model.
+            let mut checked: Option<Instant> = None;
             let next = loop {
                 // `biased` so cancellation wins a tie rather than being subject
                 // to random branch order.
@@ -410,8 +412,19 @@ impl OllamaClient {
                         // whether the model is loaded at all, and while a
                         // request is in flight it must be. If it has vanished,
                         // waiting another twenty minutes proves nothing.
-                        if quiet >= LIVENESS_AFTER.as_secs() && quiet % LIVENESS_EVERY == 0 {
-                            if let Ok(ps) = self.ps().await {
+                        let due = quiet >= LIVENESS_AFTER.as_secs()
+                            && checked.is_none_or(|at: Instant| at.elapsed() >= LIVENESS_EVERY);
+                        if due {
+                            checked = Some(Instant::now());
+                            // Raced against cancellation as well: a fifteen
+                            // second HTTP timeout in here would be fifteen
+                            // seconds where Stop does nothing.
+                            let alive = tokio::select! {
+                                biased;
+                                _ = cancelled(&cancel) => return Err(OllamaError::Cancelled),
+                                probe = self.ps() => probe,
+                            };
+                            if let Ok(ps) = alive {
                                 if !ps.models.iter().any(|m| m.name == model) {
                                     let _ = tx
                                         .send(StreamEvent::Error {
