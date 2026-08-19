@@ -574,7 +574,10 @@ export default function Chat({
     if (!rate || rate <= 0) return null;
     // The engine caps a reply at half the window, up to 8192 — mirrored here
     // rather than plumbed through, since it is only used to draw a bar.
-    const cap = Math.min(8192, Math.max(1024, Math.floor((limit ?? 8192) / 2)));
+    // Mirrors `ollama::reply_budget`, including its behaviour when the window
+    // is unknown — half the window up to 8192, and 8192 when there is no window
+    // to halve.
+    const cap = limit ? Math.min(8192, Math.max(1024, Math.floor(limit / 2))) : 8192;
     const tokens = Math.round(waiting.seconds * rate);
     return { tokens, pct: Math.min(100, Math.round((tokens / cap) * 100)) };
   }, [waiting, session.lastRate, activeModel, limit]);
