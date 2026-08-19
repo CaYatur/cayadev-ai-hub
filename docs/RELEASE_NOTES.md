@@ -1,3 +1,91 @@
+# v0.2.3 — a working model is no longer cut off, and it shows its work
+
+v0.2.2 bounded the wait by what the model may produce, which was the right idea
+and still killed a run at the thirty-minute mark. Two arithmetic errors, both
+now fixed and both covered by tests that name the runs they came from.
+
+## The budget was sized from the fastest step
+
+For a timeout that is backwards. It has to be the pessimistic figure, because
+sizing from a fast step and then meeting a slow one is exactly how a working run
+gets killed. The same model reported **6.4 tok/s on its short steps and 4.0
+while writing a long file** — 6.4 gives a thirty-minute budget, and the file
+needed longer.
+
+It is now the slowest step of the run, ignoring steps too short to mean
+anything: a handful of tokens around a tool call reports a rate dominated by
+overhead, not by decoding.
+
+## And the cap was below the honest bound
+
+2400 s. A 27B decoding at 4 tok/s cannot finish the reply it is *allowed* to
+produce in forty minutes, so the cap fired before the model could possibly have
+been done. A cap under the real bound is the worst of both — the user waits
+*and* loses the work.
+
+The margin over the estimated rate goes from 1.4x to 3x, and the cap now covers
+a model managing one token a second:
+
+| Model | Silence tolerated |
+| --- | ---: |
+| 7B, wholly in VRAM (42 tok/s) | 10 min |
+| 27B, short steps (6.4 tok/s) | 64 min |
+| 27B, writing a long file (4.0 tok/s) | 102 min |
+| 27B under memory pressure (2.0 tok/s) | 120 min |
+
+The two errors are not symmetric. Being generous costs a wait that Stop ends at
+any moment; being tight costs an hour of finished work, and that had happened
+three times. Detecting a genuinely dead run is the liveness check's job — the
+daemon is asked every minute whether it still holds the model — not the
+timeout's.
+
+## The wait now shows progress
+
+A twenty-minute silence looked identical to a hang. Nothing can be streamed —
+the template holds the whole tool call back until it is finished — but both
+terms of an estimate are known: how long it has been quiet, and how fast this
+model decodes. The status line now reads
+
+> ● writing — this model sends nothing until it is done (12m 4s) · **~2.9k written** ▬▬▬▬▭▭▭
+
+with the bar against the reply allowance, and the hover text saying it is an
+estimate and how it is calculated.
+
+## A price tag on a model that does not fit
+
+Choosing a model too large for the card now shows what it costs, measured
+through the app's own agent code on the same job:
+
+| Model | Job | Per line |
+| --- | ---: | ---: |
+| `qwen2.5-coder:7b` | 13 s | 0.22 s |
+| `qwen3.8:27b` | 356 s | 2.25 s |
+
+Ten times per line written, twenty-seven times the wall clock. The selection
+still stands — it is a price tag, not a warning.
+
+## Why there is no speedup in this release
+
+A long investigation into making a too-large model faster is written up in
+[`SPEED_RESEARCH.md`](docs/SPEED_RESEARCH.md), including the parts that failed.
+The short version: **no runtime change tested beats Ollama on either model.**
+Speculative decoding with the model's own MTP head accepts 96% of its drafts and
+still nets nothing, because llama.cpp's placement for hybrid SSM models starts
+1.5x behind. On the 27B the bound is physical — 16.8 GB read per token out of
+DDR5.
+
+One reported result was wrong and is corrected there: an n-gram speedup on the
+7B did not reproduce under a proper two-round comparison. The measurement
+harnesses are kept in `scripts/` so the question can be re-asked on a later
+llama.cpp.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
+---
+
 # v0.2.2 — bound the wait by what the model may produce
 
 A fix for long generations on slow or spilled models, replacing fixed timeouts

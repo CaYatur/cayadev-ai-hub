@@ -1,6 +1,6 @@
 [package]
 name = "cayadev-ai-hub"
-version = "0.2.2"
+version = "0.2.3"
 description = "A local-first AI agent hub for Ollama"
 authors = ["CaYatur"]
 edition = "2021"
