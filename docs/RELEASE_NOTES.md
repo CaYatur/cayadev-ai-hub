@@ -1,3 +1,85 @@
+# v0.2.4 — a run that is working is not stopped
+
+A 20B repairing a Python file ran for fifteen minutes and stopped with
+`budget exhausted`, the file half-fixed. The worst outcome available: the wait
+was paid and the work was lost. Three separate limits were waiting to end that
+run, and only one of them was visible.
+
+## The ceiling was sized for a model going in circles
+
+Balanced allowed 24 tool steps. That number was chosen against a 0.5B calling
+the same tool over and over, where ending in seconds is a mercy. A repair is
+read, edit, run, read the traceback, edit again — thirty to eighty steps before
+anything is finished.
+
+| Effort | Was | Now |
+| --- | ---: | ---: |
+| Fast | 8 | 24 |
+| Balanced | 24 | 80 |
+| Thorough | 48 | 200 |
+
+The ceiling is there to bound a run nobody is watching. It is not a judgement
+about whether the work is done, so it now sits far above what real work costs.
+
+## Raising it alone would have moved the wall, not removed it
+
+Loop detection counted identical calls **cumulatively across the whole run**,
+three tolerated. In the run that prompted this, `python ringtone_generator.py`
+had already failed twice. On a longer leash the fourth run of that command would
+have ended the session around step 30 with `loop detected` — the same failure
+wearing a different name.
+
+The guard tells the model *the result will not change*, and that is only true
+while nothing has changed. So the memory now resets whenever the run changes
+something:
+
+- Re-running the same failing command after an edit is **repair**, and the count
+  starts again.
+- The same call four times with **nothing changed in between** still stops the
+  run.
+- A change cannot excuse its own repetition: writing the identical file over and
+  over keeps its own count, so it still trips.
+
+The limit this leaves is written down rather than hidden. Two calls that both
+change something can alternate indefinitely — edit, run, edit, run — and that is
+also exactly what a real repair looks like, so the guard cannot tell them apart
+and does not try. The step ceiling is what bounds it.
+
+### A trap inside the fix
+
+The first version asked the permission engine whether the call was risky.
+`Evaluation::allow` carries `ReadOnly` whatever it allowed, so an auto-approved
+write inside the workspace — Autonomous mode, the ordinary case — reported that
+nothing had changed. The signal is now the action itself, and a test asserts
+both halves in the same breath: the evaluation says `ReadOnly`, the action says
+it changed something.
+
+## One stall no longer costs the whole run
+
+A stall was tolerated once per run. On an 80-step run that means a single
+transient stall at step 70 discards an hour of finished work. Retries are now
+counted consecutively: two stalls in a row is a real failure, a stall at step
+five and another at step seventy are unrelated events.
+
+## The limit is visible, and says so in Turkish
+
+The status line carries the step count against the ceiling — `adım 31/80` —
+amber once the run is against it. A wall you can watch approach is not the same
+thing as one that lands without warning.
+
+And the stop reasons are translated. `Durdu: budget exhausted` was raw English
+in a Turkish interface, and said nothing about what to do; it now reads *Durdu:
+adım tavanına ulaşıldı. Kaldığı yerden sürdürmek için "devam et" yazın* — and
+typing that does continue, because earlier turns are replayed with each tool
+call folded to one line.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
+---
+
 # v0.2.3 — a working model is no longer cut off, and it shows its work
 
 v0.2.2 bounded the wait by what the model may produce, which was the right idea
