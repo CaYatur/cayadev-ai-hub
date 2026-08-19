@@ -131,55 +131,56 @@ runtime: the app already routes coding work to the 7B, and the measurement says
 routing is worth more than every runtime trick attempted here combined. The
 27B's value is judgement on hard problems, not throughput on ordinary ones.
 
-## Where speculation *does* pay: the 7B
+## The 7B: no speedup either, and a correction
 
-The model that fits in VRAM has none of the placement problems, and there
-speculation is a real gain. Same session, same protocol, `qwen2.5-coder:7b`
-wholly on the card:
+A first pass measured n-gram speculation on `qwen2.5-coder:7b` at 66.6 tok/s
+against a 39.6 baseline and it was written up here as a 1.4–1.7x. **That does
+not reproduce.** Re-measured properly — two rounds, interleaved, and against
+Ollama rather than against llama.cpp's own baseline:
 
-| Configuration | prose | code | toolcall | against base |
-| --- | ---: | ---: | ---: | --- |
-| base | 48.64 | 39.55 | 39.61 | — |
-| `--spec-type ngram-cache`, n=5 | **67.48** | **66.63** | **66.64** | **1.39x / 1.68x / 1.68x** |
-| `--spec-type draft-simple`, `qwen2.5-coder:0.5b`, n=5 | 31.66 | 54.18 | 48.86 | 0.65x / 1.37x / 1.23x |
+| Configuration | code (r1/r2) | toolcall (r1/r2) |
+| --- | ---: | ---: |
+| **Ollama** | **60.9 / 50.9** | **41.6 / 41.2** |
+| llama.cpp, whole model on GPU | 42.8 / 46.8 | 39.1 / 39.7 |
+| llama.cpp + `ngram-cache`, n=5 | 47.0 / 45.6 | 40.9 / 40.2 |
 
-Two things worth noticing.
+n-gram against llama.cpp's own baseline is inside the round-to-round spread —
+no gain. Against Ollama, which is what the app uses, it is *slower*. The 66.6
+reading came from the same batch that reported an impossible 18.4 tok/s for the
+baseline on the same prompt; that batch was contaminated and both numbers should
+have been discarded together.
 
-**The n-gram drafter wins, and it costs nothing.** It needs no second model and
-no extra VRAM — it drafts from the text already generated, which is why it is
-strongest on the repetitive structure of code and tool calls, and why it does
-not lose on prose the way a model drafter does. A 0.5B drafter is *worse* than
-no drafter on prose (31.66 against 48.64): every rejected draft is a
-verification pass wasted, and prose rejects a lot. It measured 64.6% acceptance
-on code against 31% on prose.
+The failure mode is worth naming: **a single reading that agrees with what you
+hoped for does not get checked as hard as one that does not.** The 18.4 looked
+wrong so it was re-run; the 66.6 looked right so it was published. Interleaved
+rounds are now the protocol precisely because they make that impossible — a
+configuration is measured twice, alternating with its control, and disagreement
+between rounds is a result about the measurement rather than about the model.
 
-### But it is not free: the output can change
+### What does still hold from that work
 
-At temperature 0 speculation is supposed to be exactly lossless — the target
-verifies every drafted token and rejects anything it would not have produced.
-Checked rather than assumed, and the check failed:
+- A 0.5B drafter is **worse than no drafter on prose** (31.7 against 48.6):
+  every rejected draft is a wasted verification pass, and prose rejects most of
+  them. Measured 31% acceptance on prose against 65% on code.
+- Speculation is **not bit-lossless** in llama.cpp even at temperature 0. The
+  same tool-call prompt produced a different page title with n-gram than
+  without, while running the same configuration twice was byte-identical. The
+  control is what makes that meaningful. Probably numerical — verifying a batch
+  does not take the same floating-point path as decoding one token at a time,
+  and a near-tie flips. `scripts/spec_lossless.py` keeps the check.
 
-| Prompt | base vs n-gram | base vs base (control) |
-| --- | --- | --- |
-| code | identical | identical |
-| tool call | **different** | identical |
+## Verdict for the whole investigation
 
-The control matters: run twice with no speculation, the engine is
-byte-deterministic. So the difference is caused by speculation, not by run-to-run
-noise. The two answers were both valid — one page titled "40 Lines of HTML", the
-other "Document" — but they are not the same answer.
+**No runtime change tested here beats Ollama on either model.** Not speculative
+decoding with the model's own MTP head, not a separate drafter, not n-gram, not
+tensor placement, not KV quantisation, not thread or batch tuning. On the 27B
+the bound is physical — 16.8 GB read per token out of DDR5. On the 7B, Ollama is
+already at the top of what was measured.
 
-The likely cause is numerical: verifying a batch of drafted tokens does not take
-the same floating-point path as decoding one at a time, and a near-tie between
-two tokens flips. That makes it distributionally sound and bit-wise different,
-which is fine for prose and worth knowing about for anything reproducible.
+The one thing that does move the number by an order of magnitude is choosing a
+model that fits in the card, which the app already does and now puts a price on.
 
-**So it is a 1.4–1.7x on the model the app actually routes to, at the price of
-not being able to promise the same bytes twice.** Not enabled by default here,
-because it needs a llama.cpp process the app does not manage — but it is the one
-runtime lever in this whole investigation that pays.
-
-## Measurement discipline
+## Measurement discipline## Measurement discipline
 
 Two mistakes early on, both worth recording because either invalidates a whole
 session:
@@ -192,6 +193,12 @@ session:
   oversubscription and pages it over PCIe, which measured **0.69 tok/s** —
   six times *slower* than leaving the weights in RAM. Never offload more than
   fits; `llama-fit-params` computes the number.
+- **Publishing a single reading that agreed with the hypothesis.** The 7B n-gram
+  result was written up as a 1.4–1.7x from one batch, and did not survive a
+  second look. The reading that looked wrong in that same batch was re-run; the
+  one that looked right was not. `scripts/spec_confirm.py` now measures each
+  configuration twice, interleaved with its control, so a number has to agree
+  with itself before it means anything.
 
 Readings on this model move ±30% between sessions depending on what else holds
 VRAM, so every number above is against a control taken minutes apart on the same
