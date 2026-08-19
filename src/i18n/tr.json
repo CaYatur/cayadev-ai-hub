@@ -26,6 +26,13 @@
     "stop": "Durdur",
     "used": "kullanıldı",
     "stopped": "Durdu: {{reason}}",
+    "step": "adım {{n}}/{{max}}",
+    "stopReason": {
+      "budget_exhausted": "Durdu: adım tavanına ulaşıldı. Kaldığı yerden sürdürmek için \"devam et\" yazın.",
+      "loop_detected": "Durdu: model aynı çağrıyı, arada hiçbir şey değişmeden tekrarlıyordu.",
+      "failed": "Durdu: çalışma başarısız oldu.",
+      "cancelled": "Durduruldu."
+    },
     "copy": "Kopyala",
     "retry": "Bunu yeniden çalıştır, sonrasını sil",
     "branch": "Buradan yeni bir oturumda devam et",
@@ -76,11 +83,11 @@
     "label": "Efor",
     "note": "Düşünme ve adım bütçesi. İkisi de yerel modelde görevin süresini değiştirir.",
     "fast": "Hızlı",
-    "fast_hint": "Düşünme yok, 8 adım. Düzenleme ve arama için.",
+    "fast_hint": "Düşünme yok, 24 adım. Düzenleme ve arama için.",
     "balanced": "Dengeli",
-    "balanced_hint": "Düşünme yok, 24 adım.",
+    "balanced_hint": "Düşünme yok, 80 adım.",
     "thorough": "Kapsamlı",
-    "thorough_hint": "Destekleyen modelde düşünme, 48 adım."
+    "thorough_hint": "Destekleyen modelde düşünme, 200 adım."
   },
   "context": {
     "label": "Bağlam penceresi",

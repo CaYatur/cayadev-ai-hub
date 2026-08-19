@@ -10,10 +10,12 @@
 //! 1. **Schema validation** before execution. A model that omits a required
 //!    argument is told which one, by name, instead of receiving a generic tool
 //!    failure it cannot act on.
-//! 2. **Loop detection** on the call signature. Identical calls repeated past a
-//!    threshold get one corrective message, then the run is abandoned.
-//! 3. **Step budget.** A hard ceiling so a confused session ends in seconds
-//!    rather than minutes.
+//! 2. **Loop detection** on the call signature, remembered only until the run
+//!    changes something. Identical calls repeated with nothing changed in
+//!    between get one corrective message, then the run is abandoned.
+//! 3. **Step ceiling.** A bound on a run nobody is watching. Not a judgement
+//!    about whether the work is finished, so it sits far above what a real
+//!    repair costs.
 
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -131,6 +133,12 @@ impl Turn {
 #[derive(Debug, Clone)]
 pub struct RunConfig {
     pub model: String,
+    /// Tool steps before the run is cut off.
+    ///
+    /// A bound on a run nobody is watching, not a guess at how much work the
+    /// task needs. Repairing a file is thirty to eighty steps of read, edit,
+    /// run, read the traceback, edit again; sized under that, the ceiling
+    /// stops runs that are working, which is exactly what it used to do.
     pub max_steps: usize,
     pub num_ctx: Option<u32>,
     pub think: bool,
@@ -157,7 +165,7 @@ impl Default for RunConfig {
     fn default() -> Self {
         Self {
             model: String::new(),
-            max_steps: 24,
+            max_steps: 80,
             num_ctx: None,
             think: false,
             // Long enough that a multi-step task never pays a reload. A cold
@@ -241,9 +249,12 @@ impl AgentRunner {
         // of it, so the index moves and has to be carried rather than assumed.
         let mut task = messages.len() - 1;
 
-        let mut signature_counts: HashMap<String, usize> = HashMap::new();
-        // One retry per run: a second stall is a real failure, not a full window.
-        let mut stalled_once = false;
+        let mut repeats = Repetition::default();
+        // Retries count consecutively, not per run. Two stalls in a row is a
+        // real failure; a stall at step five and another at step seventy are
+        // unrelated events, and an hour of finished work should not turn on
+        // whether the first one happened.
+        let mut stalled_in_a_row = 0usize;
 
         for step in 0..self.config.max_steps {
             if self.cancelled() {
@@ -321,8 +332,8 @@ impl AgentRunner {
                 // conversation is demonstrably fine — the model was generating
                 // and did not finish in time — so trimming would only make the
                 // retry say something different for no reason.
-                Err(crate::ollama::OllamaError::Stalled { .. }) if !stalled_once => {
-                    stalled_once = true;
+                Err(crate::ollama::OllamaError::Stalled { .. }) if stalled_in_a_row == 0 => {
+                    stalled_in_a_row += 1;
                     let long = self
                         .config
                         .num_ctx
@@ -345,6 +356,12 @@ impl AgentRunner {
                     return StopReason::Failed;
                 }
             };
+
+            // Any response at all counts, including a reply truncated at the
+            // length cap: the daemon answered, so the previous stall was not
+            // the start of a dead run. Alternating stall and truncation would
+            // then retry indefinitely, and the step ceiling is what stops it.
+            stalled_in_a_row = 0;
 
             let assistant = response.message.clone().unwrap_or_default();
             let _ = events
@@ -441,13 +458,12 @@ impl AgentRunner {
 
                 // --- Guard 2: repetition ------------------------------------
                 let signature = call_signature(&name, &args);
-                let seen = signature_counts.entry(signature).or_insert(0);
-                *seen += 1;
-                if *seen > self.config.loop_threshold {
+                let seen = repeats.record(&signature);
+                if seen > self.config.loop_threshold {
                     let msg = format!(
-                        "You have called `{name}` with identical arguments {seen} times. \
-                         The result will not change. Use the result you already have, or \
-                         answer without calling a tool."
+                        "You have called `{name}` with identical arguments {seen} times and \
+                         nothing has changed in between. The result will not change either. \
+                         Use the result you already have, or answer without calling a tool."
                     );
                     messages.push(Message::tool_result(&name, &msg));
                     let _ = events
@@ -457,8 +473,9 @@ impl AgentRunner {
                 }
 
                 // --- Guard 3: permission ------------------------------------
-                let evaluation = match tools.action_for(&name, &args) {
-                    Some(action) => self.perms.evaluate(&action),
+                let action = tools.action_for(&name, &args);
+                let evaluation = match &action {
+                    Some(action) => self.perms.evaluate(action),
                     None => Evaluation::allow_internal("Tool has no effect outside the app."),
                 };
 
@@ -508,7 +525,15 @@ impl AgentRunner {
                                     .await;
                                 return StopReason::Cancelled;
                             }
-                            Some(Ok(out)) => out,
+                            Some(Ok(out)) => {
+                                // The world moved. A command that failed a
+                                // moment ago may well succeed now, so what the
+                                // repetition guard remembers starts again here.
+                                if action.as_ref().is_some_and(Action::changes_something) {
+                                    repeats.changed(&signature);
+                                }
+                                out
+                            }
                             Some(Err(e)) => format!("Error: {e}"),
                         }
                     }
@@ -549,6 +574,40 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Which calls have been made, so a model going in circles is caught.
+///
+/// The guard tells the model "the result will not change", and that is only
+/// true while nothing has changed. Counted cumulatively across a whole run it
+/// ended runs that were working: repairing a file means running the same
+/// failing command after every edit, and the fourth run tripped a threshold
+/// meant for a model asking the same question over and over.
+///
+/// So a call that changes something clears the memory — apart from its own
+/// count, which would otherwise let a call excuse its own repetition forever.
+///
+/// The limit this leaves: two calls that both change something can alternate
+/// without either count climbing — edit, run, edit, run. That is also exactly
+/// what repairing a file looks like, so the guard cannot tell the two apart
+/// and does not try. The step ceiling is what bounds it.
+#[derive(Default)]
+struct Repetition {
+    counts: HashMap<String, usize>,
+}
+
+impl Repetition {
+    /// Count this call, and report how many times it has now been made.
+    fn record(&mut self, signature: &str) -> usize {
+        let seen = self.counts.entry(signature.to_string()).or_insert(0);
+        *seen += 1;
+        *seen
+    }
+
+    /// Something changed, by way of the call `signature` names.
+    fn changed(&mut self, signature: &str) {
+        self.counts.retain(|call, _| call == signature);
     }
 }
 
@@ -597,6 +656,62 @@ mod tests {
                 "required": ["path"]
             }),
         )]
+    }
+
+    /// The run this came from: a 20B repairing a Python file, editing it and
+    /// running it again after each edit. Counted cumulatively, the fourth run
+    /// of the same command was a loop and the repair was abandoned half done.
+    #[test]
+    fn re_running_a_command_after_an_edit_is_not_a_loop() {
+        let mut repeats = Repetition::default();
+        let run = "run_command::python ringtone_generator.py";
+        for attempt in 0..12 {
+            assert_eq!(repeats.record(run), 1, "run {attempt} counted as a repeat");
+            let edit = format!("write_file::attempt {attempt}");
+            repeats.record(&edit);
+            repeats.changed(&edit);
+        }
+    }
+
+    #[test]
+    fn the_same_call_with_nothing_changed_still_counts_up() {
+        let mut repeats = Repetition::default();
+        let call = "read_file::a.py";
+        assert_eq!(repeats.record(call), 1);
+        assert_eq!(repeats.record(call), 2);
+        assert_eq!(repeats.record(call), 3);
+        assert_eq!(repeats.record(call), 4);
+    }
+
+    #[test]
+    fn a_change_does_not_excuse_its_own_repetition() {
+        // Writing the identical file over and over is a loop even though every
+        // write changes something; it must not be able to clear its own count.
+        let mut repeats = Repetition::default();
+        let write = "write_file::same content";
+        for expected in 1..=4 {
+            assert_eq!(repeats.record(write), expected);
+            repeats.changed(write);
+        }
+    }
+
+    #[test]
+    fn reading_around_does_not_clear_the_memory() {
+        // Only a change clears it, and the runner only reports one for a call
+        // that was more than read-only.
+        let mut repeats = Repetition::default();
+        assert_eq!(repeats.record("read::a"), 1);
+        repeats.record("read::b");
+        repeats.record("search::todo");
+        assert_eq!(repeats.record("read::a"), 2);
+    }
+
+    /// The ceiling is a bound on an unattended run, not a guess at the size of
+    /// the job. The run that prompted this spent twenty-four steps in fifteen
+    /// minutes and was not close to done.
+    #[test]
+    fn the_ceiling_is_well_above_what_a_repair_costs() {
+        assert!(RunConfig::default().max_steps >= 60);
     }
 
     #[test]

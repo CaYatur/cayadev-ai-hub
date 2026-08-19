@@ -33,6 +33,10 @@ const MODES: PermissionMode[] = [
 ];
 const EFFORTS: Effort[] = ["fast", "balanced", "thorough"];
 
+/// Mirrors `Effort::max_steps` in `commands.rs`, so the status line can show
+/// the ceiling a run is heading for instead of announcing it afterwards.
+const MAX_STEPS: Record<Effort, number> = { fast: 24, balanced: 80, thorough: 200 };
+
 /// How tall the instruction box may grow, in pixels.
 ///
 /// Roughly twelve lines. Past that the transcript starts disappearing behind
@@ -374,6 +378,7 @@ export default function Chat({
   runTokens,
   waiting,
   runStartedAt,
+  step,
   onPaste,
   onDetach,
   onSend,
@@ -411,6 +416,8 @@ export default function Chat({
   runTokens: number;
   waiting: { seconds: number; firstToken: boolean } | null;
   runStartedAt: number | null;
+  /// Tool steps finished in the current run, counted from one.
+  step: number;
   onPaste: (file: File) => void;
   onDetach: (path: string) => void;
   onSend: (text: string) => void;
@@ -1003,6 +1010,14 @@ export default function Chat({
               <span className="sep">·</span>
               <span className={liveRate !== null ? "status-rate status-rate-live" : "status-rate"}>
                 {rate.toFixed(1)} tok/s
+              </span>
+            </>
+          )}
+          {step > 0 && (
+            <>
+              <span className="sep">·</span>
+              <span className={step >= MAX_STEPS[effort] ? "status-step-full" : undefined}>
+                {t("chat.step", { n: step, max: MAX_STEPS[effort] })}
               </span>
             </>
           )}

@@ -41,7 +41,9 @@ everything else is not built yet, however well specified it looks.
   `read_config` for `read_file`, and before this the run ended having done
   nothing
 - Schema validation naming the missing argument, loop detection on the call
-  signature, step budget
+  signature — reset whenever the run changes something, so a repair that
+  re-runs the same failing command after every edit is not read as a loop —
+  and a step ceiling that bounds an unattended run
 - Tiered prompts sized to what a model can follow, with a byte-stable prefix so
   the daemon reuses its KV cache (measured: **14.8x** faster prefill)
 - **Prompts measured against tool drift** (`scripts/drift.py`): the previous

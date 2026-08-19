@@ -144,6 +144,32 @@ pub enum Action {
     AskUser,
 }
 
+impl Action {
+    /// Whether this call can change what the next call would see.
+    ///
+    /// Deliberately not [`Evaluation::risk`], which is only filled in for a
+    /// call that was escalated or refused: an allowed write inside the
+    /// workspace carries `ReadOnly`, so asking the evaluation would answer
+    /// "nothing changed" for the most ordinary change there is.
+    ///
+    /// Reading, listing, fetching and capturing leave the workspace as they
+    /// found it, so a call repeated after one of them really is the same call
+    /// asked twice.
+    pub fn changes_something(&self) -> bool {
+        match self {
+            Self::WriteFile { .. }
+            | Self::DeleteFile { .. }
+            | Self::RunCommand { .. }
+            | Self::Publish { .. } => true,
+            Self::ReadFile { .. }
+            | Self::ListDir { .. }
+            | Self::Network { .. }
+            | Self::CaptureScreen { .. }
+            | Self::AskUser => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PermissionEngine {
     pub mode: PermissionMode,
@@ -376,6 +402,41 @@ mod tests {
 
     fn inside(rel: &str) -> PathBuf {
         workspace_root().join(rel)
+    }
+
+    #[test]
+    fn a_write_changes_something_even_when_it_is_allowed_outright() {
+        // The trap this exists for: `Evaluation::allow` carries `ReadOnly`
+        // whatever it allowed, so an auto-approved write in Autonomous mode
+        // looks read-only to anything that asks the evaluation. The agent
+        // loop asks the action instead, and this is why.
+        let write = Action::WriteFile { path: inside("main.py") };
+        let evaluation = engine(PermissionMode::Autonomous).evaluate(&write);
+        assert_eq!(evaluation.decision, Decision::Allow);
+        assert_eq!(evaluation.risk, CommandRisk::ReadOnly);
+        assert!(write.changes_something());
+    }
+
+    #[test]
+    fn running_a_command_and_deleting_change_something() {
+        assert!(Action::RunCommand {
+            program: "python".into(),
+            args: vec!["main.py".into()],
+            cwd: None,
+        }
+        .changes_something());
+        assert!(Action::DeleteFile { path: inside("main.py") }.changes_something());
+    }
+
+    #[test]
+    fn looking_around_changes_nothing() {
+        // Asking the same question twice really is the same question, so none
+        // of these may excuse a repeat.
+        assert!(!Action::ReadFile { path: inside("main.py") }.changes_something());
+        assert!(!Action::ListDir { path: inside("src") }.changes_something());
+        assert!(!Action::Network { url: "https://example.com".into() }.changes_something());
+        assert!(!Action::CaptureScreen { what: "screen".into() }.changes_something());
+        assert!(!Action::AskUser.changes_something());
     }
 
     fn outside(rel: &str) -> PathBuf {

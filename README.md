@@ -61,7 +61,10 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
   blocks, `<function=name>` tags, bare JSON, and Python-style syntax, with
   repair for single quotes, unquoted keys, trailing commas, and truncated output
 - Invented tool names are corrected rather than treated as an answer
-- Loop detection, schema validation, and a step budget
+- Loop detection that forgets what it saw whenever the run changes something,
+  so re-running a failing command after an edit is repair rather than a loop
+- Schema validation, and a step ceiling sized to bound an unattended run
+  rather than to guess how much work the task needs
 - Idle-based timeouts, so a slow prefill is never mistaken for a hang
 - Stop actually stops: the flag is polled before every chunk, and it also
   reaches a run parked on an approval or a question

@@ -72,6 +72,9 @@ export default function App() {
     null,
   );
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  /// Tool steps this run has finished, shown against the effort's ceiling so
+  /// the limit is visible while it is approached rather than after it lands.
+  const [step, setStep] = useState(0);
 
   // The event stream is global, so handlers need the current session id without
   // resubscribing on every switch.
@@ -202,6 +205,8 @@ export default function App() {
 
           case "step_done":
             patch(id, (s) => applyMetrics(s, event.metrics));
+            // One-based for display: a run is on its first step, not its zeroth.
+            setStep(event.step + 1);
             // The daemon has now reported this step exactly; the estimate that
             // stood in for it while it streamed would otherwise be added twice.
             setLiveTokens(0);
@@ -216,7 +221,14 @@ export default function App() {
             if (event.reason !== "completed") {
               append(id, {
                 kind: "notice",
-                text: t("chat.stopped", { reason: event.reason.replace(/_/g, " ") }),
+                // Every reason the backend sends has a translation; the
+                // fallback is for one added later, where an English word in a
+                // Turkish sentence still beats no sentence.
+                text: t(`chat.stopReason.${event.reason}`, {
+                  defaultValue: t("chat.stopped", {
+                    reason: event.reason.replace(/_/g, " "),
+                  }),
+                }),
                 tone: "info",
               });
             }
@@ -341,6 +353,8 @@ export default function App() {
       }
       setRunning(true);
       setRunStartedAt(Date.now());
+      // The ceiling is per run, so the count shown against it has to be too.
+      setStep(0);
       setLiveTokens(0);
       setRunTokens(0);
       setWaiting(null);
@@ -576,6 +590,7 @@ export default function App() {
             runTokens={runTokens}
             waiting={waiting}
             runStartedAt={runStartedAt}
+            step={step}
             onPaste={attachPasted}
             dropping={dropping}
             onDetach={detach}

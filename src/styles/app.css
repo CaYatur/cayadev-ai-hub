@@ -630,6 +630,11 @@
   color: var(--ok);
 }
 
+/* The step count only draws attention once the run is against the ceiling. */
+.status-step-full {
+  color: var(--warn);
+}
+
 .status-mode {
   color: var(--text-muted);
 }

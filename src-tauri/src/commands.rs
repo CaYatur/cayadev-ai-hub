@@ -450,11 +450,18 @@ impl Effort {
         matches!(self, Self::Thorough)
     }
 
+    /// Tool steps a run may take before the ceiling ends it.
+    ///
+    /// These were 8/24/48, sized against a 0.5B repeating itself. A 20B
+    /// repairing a Python file spent them in fifteen minutes and stopped with
+    /// the file half-fixed — the worst outcome available, because the wait was
+    /// paid and the work was lost. Deciding that a run is going nowhere is the
+    /// repetition guard's job; this is only here so a run left alone ends.
     pub fn max_steps(self) -> usize {
         match self {
-            Self::Fast => 8,
-            Self::Balanced => 24,
-            Self::Thorough => 48,
+            Self::Fast => 24,
+            Self::Balanced => 80,
+            Self::Thorough => 200,
         }
     }
 }

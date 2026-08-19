@@ -26,6 +26,13 @@
     "stop": "Stop",
     "used": "used",
     "stopped": "Stopped: {{reason}}",
+    "step": "step {{n}}/{{max}}",
+    "stopReason": {
+      "budget_exhausted": "Stopped: the step ceiling was reached. Type \"continue\" to carry on from here.",
+      "loop_detected": "Stopped: the model kept making the same call with nothing changing in between.",
+      "failed": "Stopped: the run failed.",
+      "cancelled": "Stopped."
+    },
     "copy": "Copy",
     "retry": "Run this again, discarding what followed",
     "branch": "Continue from here in a new session",
@@ -76,11 +83,11 @@
     "label": "Effort",
     "note": "Thinking and step budget. Both change how long a task takes on a local model.",
     "fast": "Fast",
-    "fast_hint": "No thinking, 8 steps. For edits and lookups.",
+    "fast_hint": "No thinking, 24 steps. For edits and lookups.",
     "balanced": "Balanced",
-    "balanced_hint": "No thinking, 24 steps.",
+    "balanced_hint": "No thinking, 80 steps.",
     "thorough": "Thorough",
-    "thorough_hint": "Thinking where supported, 48 steps."
+    "thorough_hint": "Thinking where supported, 200 steps."
   },
   "context": {
     "label": "Context window",
