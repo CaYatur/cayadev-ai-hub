@@ -2006,3 +2006,16 @@
   border-color: var(--info);
   outline: none;
 }
+
+/* The measured cost of choosing a model that does not fit, shown where the
+   choice is made. A price tag rather than a warning — the selection stands. */
+.ctl-cost {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245, 185, 66, 0.14);
+  border: 1px solid rgba(245, 185, 66, 0.3);
+  color: var(--warn);
+  font-size: 10px;
+  letter-spacing: 0.01em;
+}

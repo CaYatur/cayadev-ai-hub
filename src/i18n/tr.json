@@ -112,7 +112,9 @@
     "cloud": "Bulut",
     "cloud_hint": "Uzakta çalışır; yerel bellek geçerli değil.",
     "unknown": "Bilinmiyor",
-    "unknown_hint": "Tahmin için yeterli veri yok."
+    "unknown_hint": "Tahmin için yeterli veri yok.",
+    "spilledCost": "~10x yavaş",
+    "spilledCostHint": "Bu sınıf bir makinede ölçüldü: aynı iş VRAM'e sığan modelde 13 sn, sığmayanda 431 sn sürdü — yazılan satır başına yaklaşık on kat. Seçimin geçerli; bu sadece bedeli."
   },
   "tasks": {
     "reasoning": "Planlama ve zor hata ayıklama",

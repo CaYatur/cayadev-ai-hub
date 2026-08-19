@@ -112,7 +112,9 @@
     "cloud": "Cloud",
     "cloud_hint": "Runs remotely; local memory does not apply.",
     "unknown": "Unknown",
-    "unknown_hint": "Not enough metadata to estimate."
+    "unknown_hint": "Not enough metadata to estimate.",
+    "spilledCost": "~10x slower",
+    "spilledCostHint": "Measured on this kind of machine: the same job took 13 s on a model that fits in VRAM and 431 s on one that does not — about ten times per line written. Your choice stands; this is only the price."
   },
   "tasks": {
     "reasoning": "Planning & hard debugging",

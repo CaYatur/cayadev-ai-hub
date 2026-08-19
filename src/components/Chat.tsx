@@ -514,6 +514,20 @@ export default function Chat({
     [models],
   );
 
+  /// Whether the chosen model is one that spills, while a resident one exists.
+  ///
+  /// Not a warning about the model — it is the user's machine and their choice.
+  /// It is a price tag. Measured on the reference machine, the same instruction
+  /// through the same agent code took 13 s on a resident 7B and 431 s on a
+  /// spilled 27B: about ten times per line of output. That is worth knowing
+  /// before waiting, and nothing else in the interface says it at the moment of
+  /// choosing.
+  const slowChoice = useMemo(() => {
+    const chosen = models.find((m) => m.name === model);
+    if (!chosen || chosen.placement !== "spilled") return false;
+    return models.some((m) => m.placement === "resident" && m.capabilities.tools);
+  }, [models, model]);
+
   // With no explicit pick, routing decides — so resolve what it would choose
   // rather than showing nothing. A context meter that reads "—" by default is
   // the same as not having one.
@@ -852,6 +866,11 @@ export default function Chat({
               onClick={() => setMenu(menu === "model" ? null : "model")}
             >
               {model || `${t("modelsView.auto")}${routing?.coding ? ` · ${routing.coding}` : ""}`}
+              {slowChoice && (
+                <span className="ctl-cost" title={t("modelsView.spilledCostHint")}>
+                  {t("modelsView.spilledCost")}
+                </span>
+              )}
               <span className="caret">⌃</span>
             </button>
             <Popover
