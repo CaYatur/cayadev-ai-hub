@@ -73,10 +73,39 @@ of 65 layers on the card, the other 45 have their SSM operation shipped to the
 GPU and back — 45 round trips over PCIe per token, on a model that was already
 bandwidth bound.
 
-That is a placement bug, not a property of speculation, and it is the thing
-standing between a measured 96% draft acceptance and a real speedup. Two ways
-out are under test: `--no-op-offload`, which stops host tensors having their
-operations offloaded, and `-ngl 0`, which removes the split entirely.
+Two ways out were tried, and neither closes the gap.
+
+| Attempt | prose | code | toolcall | against 20-layer baseline |
+| --- | ---: | ---: | ---: | --- |
+| `-ngl 0` — no split at all | 1.93 | — | — | **worse**; the 20 GPU layers earn their keep despite the round trips |
+| `--no-op-offload` — keep the split, stop shipping host ops | 2.82 | 2.75 | 2.80 | +11% / +6% / +9% |
+
+`--no-op-offload` removes the warning entirely and is a real gain, but a small
+one: the round trips were not the main cost. Pure CPU is worse still, so the
+card is helping even while llama.cpp uses it badly.
+
+### Verdict for the 27B
+
+**There is no net speedup available on this model through llama.cpp today.**
+Three independent attempts converge on it: speculation works beautifully (96%
+acceptance, 1.6–2.6x over llama.cpp's own baseline) but that baseline starts
+1.5x behind Ollama, and the two cancel. The blocker is llama.cpp's placement for
+hybrid SSM models being slower than Ollama's, not speculation failing.
+
+Recorded rather than hidden, because it answers the question directly: for
+`qwen3.8:27b` on an 8 GB card, 9 tok/s cannot be doubled by changing runtime or
+settings. It is bounded by reading 16.8 GB per token from DDR5.
+
+What *would* change it, none of which is a setting:
+
+- **A quantisation that fits.** ~7 GB of weights would put the whole model on
+  the card and is worth the measured 8x. No published quant of this model is
+  that small, and re-quantising from q4 loses more than it gains.
+- **llama.cpp fixing hybrid-SSM placement.** Then MTP's 96% acceptance lands on
+  a baseline that is not handicapped, and the 2x is real. Worth re-testing on
+  each release; the measurement harness is in `scripts/`.
+- **More memory bandwidth.** A desktop card with 16 GB+ ends the problem
+  outright.
 
 ## Measurement discipline
 
