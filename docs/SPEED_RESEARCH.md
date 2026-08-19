@@ -114,14 +114,17 @@ takes, so the same instruction — "write a single-file HTML page introducing
 yourself, inline CSS, at least 120 lines" — was run through `AgentRunner`
 itself, same tools, same permission engine, only the model changed.
 
-| Model | Job | Rate | Written |
-| --- | ---: | ---: | --- |
-| `qwen2.5-coder:7b` | **13 s** | 64.1 tok/s | 59 lines |
-| `qwen3.8:27b` | **431 s** | 4.0 tok/s | 199 lines |
+| Model | Job | Rate | Written | Per line |
+| --- | ---: | ---: | --- | ---: |
+| `qwen2.5-coder:7b` | **13 s** | 64.1 tok/s | 59 lines | 0.22 s |
+| `qwen3.8:27b` | **356 s** | 4.1 tok/s | 158 lines | 2.25 s |
 
-The pages differ in length, so the fair comparison is per line of output:
-**2.17 s/line against 0.22 s/line — about ten times.** The 27B is not ten times
-better at writing an HTML page.
+Twenty-seven times the wall clock, and the pages differ in length, so the fair
+comparison is per line written: **0.22 s against 2.25 s — ten times.** The 27B
+is not ten times better at writing an HTML page.
+
+The same run measured on a separate occasion at 431 s for 199 lines — 2.17 s per
+line. Two sittings, the same ratio.
 
 That is the actual answer to "how do I make this faster", and it needs no new
 runtime: the app already routes coding work to the 7B, and the measurement says
