@@ -45,7 +45,9 @@
     "pasted": "yapıştırılan görsel",
     "jumpLatest": "En sona git",
     "loading": "model yükleniyor… {{time}}",
-    "generating": "yazıyor — bu model bitirmeden bir şey göndermiyor ({{time}})"
+    "generating": "yazıyor — bu model bitirmeden bir şey göndermiyor ({{time}})",
+    "generatedSoFar": "~{{tokens}} yazıldı",
+    "generatedHint": "Sessizliğin süresi ve bu modelin ölçülen hızından tahmin ediliyor. Yanıtın bir üst sınırı var, çubuk kabaca ne kadarının yazıldığını gösteriyor."
   },
   "approval": {
     "title": "{{tool}} onaylansın mı?",

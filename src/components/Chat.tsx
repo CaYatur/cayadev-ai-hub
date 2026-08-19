@@ -557,6 +557,28 @@ export default function Chat({
   const limit = numCtx ?? ctxOptions?.recommended ?? activeModel?.recommended_context ?? null;
   const trainedMax = ctxOptions?.trained_max ?? activeModel?.max_context ?? null;
 
+  /// Roughly how much the model has written during a silence it will not send.
+  ///
+  /// Some templates hold a whole tool call back until it is finished, so there
+  /// is nothing to stream and the interface has nothing to show — which is
+  /// indistinguishable from a hang. But the two things needed to estimate it
+  /// are both known: how long it has been quiet, and how fast this model
+  /// decodes. Elapsed times rate is the tokens produced, and the reply is
+  /// capped, so there is a denominator too.
+  ///
+  /// Deliberately labelled as an estimate. It is honest about being one, and it
+  /// is far better than a spinner that says nothing for twenty minutes.
+  const silentProgress = useMemo(() => {
+    if (!waiting || waiting.firstToken || waiting.seconds < 20) return null;
+    const rate = session.lastRate ?? activeModel?.observed_decode_tps ?? null;
+    if (!rate || rate <= 0) return null;
+    // The engine caps a reply at half the window, up to 8192 — mirrored here
+    // rather than plumbed through, since it is only used to draw a bar.
+    const cap = Math.min(8192, Math.max(1024, Math.floor((limit ?? 8192) / 2)));
+    const tokens = Math.round(waiting.seconds * rate);
+    return { tokens, pct: Math.min(100, Math.round((tokens / cap) * 100)) };
+  }, [waiting, session.lastRate, activeModel, limit]);
+
   async function pickFolder() {
     const chosen = await open({ directory: true, multiple: false });
     if (typeof chosen === "string") onWorkspace(chosen);
@@ -664,11 +686,35 @@ export default function Chat({
         {running && !pending && (
           <div className="working">
             <span className="pulse" />{" "}
-            {waiting
-              ? t(waiting.firstToken ? "chat.loading" : "chat.generating", {
-                  time: formatElapsed(waiting.seconds * 1000),
-                })
-              : t("chat.working")}
+            {waiting ? (
+              waiting.firstToken ? (
+                t("chat.loading", { time: formatElapsed(waiting.seconds * 1000) })
+              ) : (
+                <>
+                  {t("chat.generating", {
+                    time: formatElapsed(waiting.seconds * 1000),
+                  })}
+                  {silentProgress && (
+                    <>
+                      {" · "}
+                      <span className="working-est">
+                        {t("chat.generatedSoFar", {
+                          tokens: formatTokens(silentProgress.tokens),
+                        })}
+                      </span>
+                      <span className="working-bar" title={t("chat.generatedHint")}>
+                        <span
+                          className="working-bar-fill"
+                          style={{ width: `${silentProgress.pct}%` }}
+                        />
+                      </span>
+                    </>
+                  )}
+                </>
+              )
+            ) : (
+              t("chat.working")
+            )}
           </div>
         )}
         {!atBottom && (

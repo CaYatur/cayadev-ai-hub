@@ -20,6 +20,8 @@ export type ModelProfile = {
   max_context: number | null;
   recommended_context: number | null;
   placement: Placement;
+  /** Decode rate actually measured here, once a run has produced one. */
+  observed_decode_tps: number | null;
 };
 
 export type PermissionMode =

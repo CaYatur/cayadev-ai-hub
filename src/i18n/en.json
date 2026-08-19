@@ -45,7 +45,9 @@
     "pasted": "pasted image",
     "jumpLatest": "Jump to latest",
     "loading": "loading the model… {{time}}",
-    "generating": "writing — this model sends nothing until it is done ({{time}})"
+    "generating": "writing — this model sends nothing until it is done ({{time}})",
+    "generatedSoFar": "~{{tokens}} written",
+    "generatedHint": "Estimated from how long it has been quiet and how fast this model decodes. The reply is capped, so the bar shows roughly how far through it is."
   },
   "approval": {
     "title": "Approve {{tool}}?",

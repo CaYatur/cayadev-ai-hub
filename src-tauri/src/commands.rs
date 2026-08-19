@@ -393,22 +393,28 @@ pub async fn run_agent(
     let emitter = app.clone();
     let pump = tokio::spawn(async move {
         // The rate this model really manages, kept for the next run's budgets.
-        // The estimate from placement is a starting point; after one step there
-        // is a measurement, and a spilled model can be half the estimate or
-        // twice it depending on what else is on the card.
-        let mut fastest: Option<f64> = None;
+        //
+        // The *slowest* step, not the fastest. This is used to decide how long
+        // a silence may last before the run is abandoned, so it has to be the
+        // pessimistic figure: sizing the budget from a fast step and then
+        // meeting a slow one is exactly how a working run gets cut off. It did
+        // — a run whose quick steps reported 6.4 tok/s got a thirty-minute
+        // budget, then wrote a long file at 4.0 and was killed at thirty-one.
+        //
+        // Steps too short to mean anything are ignored: a handful of tokens
+        // around a tool call reports a rate dominated by overhead.
+        const ENOUGH_TOKENS: u32 = 32;
+        let mut slowest: Option<f64> = None;
         while let Some(event) = rx.recv().await {
             if let AgentEvent::StepDone { metrics, .. } = &event {
-                if metrics.decode_tps > 0.0 {
-                    // The fastest step, not the average: a step cut short by a
-                    // tool call reports a low rate that says nothing about how
-                    // fast the model decodes.
-                    fastest = Some(fastest.map_or(metrics.decode_tps, |f: f64| f.max(metrics.decode_tps)));
+                if metrics.decode_tps > 0.0 && metrics.output_tokens >= ENOUGH_TOKENS {
+                    slowest =
+                        Some(slowest.map_or(metrics.decode_tps, |s: f64| s.min(metrics.decode_tps)));
                 }
             }
             let _ = emitter.emit("agent://event", &event);
         }
-        fastest
+        slowest
     });
 
     let reason: StopReason = runner.run(&prompt, &mut tools, gate.as_ref(), tx).await;

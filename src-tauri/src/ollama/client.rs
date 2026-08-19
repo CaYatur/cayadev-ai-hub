@@ -117,16 +117,40 @@ impl Timeouts {
     /// it means something is broken, while the same silence from a 27B running
     /// out of system RAM is a third of one reply.
     pub fn for_generation(tokens_per_second: f64, max_tokens: u32) -> Self {
-        /// Slack over the theoretical worst case. Decode rate is not constant —
-        /// a busy card halves it — and being slightly generous costs a wait,
-        /// while being slightly tight costs the work.
-        const MARGIN: f64 = 1.4;
+        /// Slack over the rate we think the model runs at.
+        ///
+        /// Deliberately large, because the two errors are not symmetric. Being
+        /// generous costs a wait the user can cancel at any moment — the status
+        /// line says what is happening and Stop works. Being tight costs an
+        /// hour of finished work, and that has now happened twice: once at 623 s
+        /// and again at 1800 s, both on a model that was working the whole time.
+        ///
+        /// It is a factor rather than a better estimate because the rate is not
+        /// knowable in advance. It varies within a single run — the same model
+        /// measured 6.4 tok/s on its short steps and 4.0 while writing a long
+        /// file — and it varies with whatever else is using the card. Three
+        /// times covers that spread without pretending to predict it.
+        const MARGIN: f64 = 3.0;
         /// Never shorter than this, however fast the model is.
         const MIN_IDLE: u64 = 180;
-        /// Never longer than this. At the point where a single reply would take
-        /// an hour, the model is the wrong one for the machine and saying so is
-        /// more use than waiting.
-        const MAX_IDLE: u64 = 2400;
+        /// Never longer than this.
+        ///
+        /// This is a guard against a nonsensical rate, not a policy about how
+        /// long a user should wait. It was 2400 s, and that cut off a real run:
+        /// a 27B decoding at 4 tok/s cannot finish the reply it is allowed to
+        /// produce in that time, so the cap fired before the model could
+        /// possibly have been done. A cap below the honest bound is the worst of
+        /// both — the user waits *and* loses the work.
+        ///
+        /// Detecting a genuinely dead run is not this number's job. The daemon
+        /// is asked every minute whether it still has the model loaded, and a
+        /// run whose model has gone fails at once regardless of the budget.
+        ///
+        /// Set to cover the slowest rate worth calling a working model: one
+        /// token a second, producing the whole allowance, is 8192 s. Below that
+        /// the machine cannot run this model usefully at all and the cap is
+        /// academic.
+        const MAX_IDLE: u64 = 9000;
 
         let rate = tokens_per_second.max(0.5);
         let idle = (f64::from(max_tokens) / rate * MARGIN).round() as u64;
@@ -549,33 +573,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_budget_covers_the_longest_reply_the_model_may_produce() {
-        // The failure this exists to prevent, twice over. qwen3.8:27b decodes
-        // at ~5.7 tok/s from system RAM; a 623 s budget cut it off mid-file
-        // because nothing said how long the file could get.
-        let cap = reply_budget(Some(65_536));
-        let t = Timeouts::for_generation(5.7, cap);
-        let worst_case = (f64::from(cap) / 5.7) as u64;
-        assert!(
-            t.idle > worst_case,
-            "budget {} is shorter than the {worst_case}s the model is allowed to take",
-            t.idle
-        );
+    fn a_working_model_is_never_cut_off_before_it_could_have_finished() {
+        // The reply is capped at `reply_budget`, so the longest a legitimate
+        // silence can last is that many tokens at whatever rate the model
+        // manages. A budget below that number cannot be right — it fires while
+        // the model is still allowed to be producing.
+        // From one token a second — below which the model is unusable anyway,
+        // and the cap stops trying to cover it — up to a resident model.
+        for rate in [1.0, 2.0, 4.0, 6.4, 12.0, 42.0] {
+            let cap = reply_budget(Some(65_536));
+            let needed = (f64::from(cap) / rate) as u64;
+            let t = Timeouts::for_generation(rate, cap);
+            assert!(
+                t.idle >= needed,
+                "at {rate} tok/s the model may legitimately take {needed}s,                  budget was {}",
+                t.idle
+            );
+        }
     }
 
     #[test]
-    fn a_resident_model_is_not_given_a_quarter_of_an_hour() {
-        // At 42 tok/s the whole allowance decodes in about three minutes, and
-        // silence past that really is a fault.
+    fn the_two_runs_that_were_cut_off_would_now_survive() {
+        // Both reported by the user, both on qwen3.8:27b at 65k context. The
+        // first died after 623 s of silence, the second after about 1800 s.
+        let cap = reply_budget(Some(65_536));
+        // The rate its long step actually ran at, from the status line.
+        let t = Timeouts::for_generation(4.0, cap);
+        assert!(t.idle > 1800, "still under the 1800s that failed: {}", t.idle);
+        assert!(t.idle > 623, "still under the 623s that failed: {}", t.idle);
+    }
+
+    #[test]
+    fn a_resident_model_is_not_given_two_hours() {
+        // Ten minutes of silence from a 42 tok/s model is a fault, not work.
         let t = Timeouts::for_generation(42.3, reply_budget(Some(32_768)));
-        assert!(t.idle <= 300, "budget {} is far longer than this model needs", t.idle);
+        assert!(t.idle <= 900, "budget {} is far longer than this model needs", t.idle);
     }
 
     #[test]
     fn the_budget_is_bounded_at_both_ends() {
         // A nonsensical rate must not produce a zero budget or an endless one.
-        assert_eq!(Timeouts::for_generation(0.0, 8192).idle, 2400);
-        assert_eq!(Timeouts::for_generation(-5.0, 8192).idle, 2400);
+        assert_eq!(Timeouts::for_generation(0.0, 8192).idle, 9000);
+        assert_eq!(Timeouts::for_generation(-5.0, 8192).idle, 9000);
         assert_eq!(Timeouts::for_generation(f64::MAX, 8192).idle, 180);
     }
 
