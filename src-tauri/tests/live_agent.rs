@@ -964,3 +964,95 @@ async fn a_screen_is_read_by_a_model_rather_than_by_powershell() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The same job, through the app's own code, on each model it can route to.
+///
+/// tok/s is a proxy; this is the number the user waits through. Both runs go
+/// through `AgentRunner` with the same permission engine, the same tools and the
+/// same instruction — the only difference is which model routing would pick.
+///
+/// ```text
+/// cargo test --test live_agent -- --ignored --nocapture --test-threads=1 the_same_job_on_both
+/// ```
+#[tokio::test]
+#[ignore = "requires a running Ollama daemon and several minutes"]
+async fn the_same_job_on_both_models() {
+    const JOB: &str = "Write a single-file HTML page introducing yourself to \
+                       intro.html. Inline CSS, at least 120 lines. Use write_file.";
+
+    let mut report = Vec::new();
+    for (model, params) in [(CODER, 7.0), (SPILLED, 27.0)] {
+        let dir = scratch("same-job");
+        let mut tools = WorkspaceTools::new(&dir);
+        let perms = PermissionEngine::new(&dir, PermissionMode::ProjectAuto);
+        let paced = client().with_timeouts(Timeouts::for_generation(
+            if params > 20.0 { 5.0 } else { 42.0 },
+            cayadev_ai_hub_lib::ollama::reply_budget(Some(16_384)),
+        ));
+        let runner = AgentRunner::new(
+            paced,
+            perms,
+            RunConfig {
+                model: model.into(),
+                max_steps: 3,
+                num_ctx: Some(16_384),
+                params_billions: Some(params),
+                ..Default::default()
+            },
+        );
+
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+        let log = Arc::new(Mutex::new(Transcript::default()));
+        let sink = log.clone();
+        let collector = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                let mut t = sink.lock().unwrap();
+                match ev {
+                    AgentEvent::Token { text } => t.text.push_str(&text),
+                    AgentEvent::ToolProposed { call } => t.tools_called.push(call.name.clone()),
+                    AgentEvent::StepDone { metrics, .. } => {
+                        t.steps += 1;
+                        t.decode_tps.push(metrics.decode_tps);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let reason = runner.run(JOB, &mut tools, &AutoApprove, tx).await;
+        let elapsed = started.elapsed();
+        let _ = collector.await;
+        let t = Arc::try_unwrap(log).ok().unwrap().into_inner().unwrap();
+
+        let bytes = std::fs::read_to_string(dir.join("intro.html"))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let lines = std::fs::read_to_string(dir.join("intro.html"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let rate = if t.decode_tps.is_empty() {
+            0.0
+        } else {
+            t.decode_tps.iter().sum::<f64>() / t.decode_tps.len() as f64
+        };
+
+        println!(
+            "\n[{model}] {reason:?} in {:.0}s — {} steps, {:.1} tok/s, \
+             {lines} lines / {bytes} bytes written",
+            elapsed.as_secs_f64(),
+            t.steps,
+            rate
+        );
+        report.push((model, elapsed.as_secs_f64(), lines, rate));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    println!("\n=== the same job, end to end ===");
+    for (model, secs, lines, rate) in &report {
+        println!("  {model:26} {secs:>7.0} s   {lines:>4} lines   {rate:>5.1} tok/s");
+    }
+    if report.len() == 2 && report[0].1 > 0.0 {
+        println!("\n  the 27B takes {:.1}x as long", report[1].1 / report[0].1);
+    }
+}

@@ -107,6 +107,38 @@ What *would* change it, none of which is a setting:
 - **More memory bandwidth.** A desktop card with 16 GB+ ends the problem
   outright.
 
+## What the numbers mean for the work the agent does
+
+Throughput is a proxy. The question worth answering is how long a real job
+takes, so the same instruction — "write a single-file HTML page introducing
+yourself, inline CSS, at least 120 lines" — was run through `AgentRunner`
+itself, same tools, same permission engine, only the model changed.
+
+| Model | Job | Rate | Written |
+| --- | ---: | ---: | --- |
+| `qwen2.5-coder:7b` | **13 s** | 64.1 tok/s | 59 lines |
+| `qwen3.8:27b` | **431 s** | 4.0 tok/s | 199 lines |
+
+The pages differ in length, so the fair comparison is per line of output:
+**2.17 s/line against 0.22 s/line — about ten times.** The 27B is not ten times
+better at writing an HTML page.
+
+That is the actual answer to "how do I make this faster", and it needs no new
+runtime: the app already routes coding work to the 7B, and the measurement says
+routing is worth more than every runtime trick attempted here combined. The
+27B's value is judgement on hard problems, not throughput on ordinary ones.
+
+## Where speculation *does* pay, and what is still open
+
+On the 7B — which fits entirely in VRAM, so none of the placement problems
+apply — llama.cpp measures 53.5 tok/s on prose and 39.5 on code with the whole
+model on the card. Whether a vocabulary-matched drafter (`qwen2.5-coder:0.5b`,
+0.4 GB, measured at 316 tok/s) lifts that further is the obvious next
+experiment; `scripts/` carries the harness for it. It was not completed here:
+the two models plus both KV caches sit close to the 8 GB limit and the runs
+became unreliable before a trustworthy number came out. Anything reported from
+those runs would have been a guess.
+
 ## Measurement discipline
 
 Two mistakes early on, both worth recording because either invalidates a whole
