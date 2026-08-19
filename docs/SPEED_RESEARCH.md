@@ -131,16 +131,53 @@ runtime: the app already routes coding work to the 7B, and the measurement says
 routing is worth more than every runtime trick attempted here combined. The
 27B's value is judgement on hard problems, not throughput on ordinary ones.
 
-## Where speculation *does* pay, and what is still open
+## Where speculation *does* pay: the 7B
 
-On the 7B — which fits entirely in VRAM, so none of the placement problems
-apply — llama.cpp measures 53.5 tok/s on prose and 39.5 on code with the whole
-model on the card. Whether a vocabulary-matched drafter (`qwen2.5-coder:0.5b`,
-0.4 GB, measured at 316 tok/s) lifts that further is the obvious next
-experiment; `scripts/` carries the harness for it. It was not completed here:
-the two models plus both KV caches sit close to the 8 GB limit and the runs
-became unreliable before a trustworthy number came out. Anything reported from
-those runs would have been a guess.
+The model that fits in VRAM has none of the placement problems, and there
+speculation is a real gain. Same session, same protocol, `qwen2.5-coder:7b`
+wholly on the card:
+
+| Configuration | prose | code | toolcall | against base |
+| --- | ---: | ---: | ---: | --- |
+| base | 48.64 | 39.55 | 39.61 | — |
+| `--spec-type ngram-cache`, n=5 | **67.48** | **66.63** | **66.64** | **1.39x / 1.68x / 1.68x** |
+| `--spec-type draft-simple`, `qwen2.5-coder:0.5b`, n=5 | 31.66 | 54.18 | 48.86 | 0.65x / 1.37x / 1.23x |
+
+Two things worth noticing.
+
+**The n-gram drafter wins, and it costs nothing.** It needs no second model and
+no extra VRAM — it drafts from the text already generated, which is why it is
+strongest on the repetitive structure of code and tool calls, and why it does
+not lose on prose the way a model drafter does. A 0.5B drafter is *worse* than
+no drafter on prose (31.66 against 48.64): every rejected draft is a
+verification pass wasted, and prose rejects a lot. It measured 64.6% acceptance
+on code against 31% on prose.
+
+### But it is not free: the output can change
+
+At temperature 0 speculation is supposed to be exactly lossless — the target
+verifies every drafted token and rejects anything it would not have produced.
+Checked rather than assumed, and the check failed:
+
+| Prompt | base vs n-gram | base vs base (control) |
+| --- | --- | --- |
+| code | identical | identical |
+| tool call | **different** | identical |
+
+The control matters: run twice with no speculation, the engine is
+byte-deterministic. So the difference is caused by speculation, not by run-to-run
+noise. The two answers were both valid — one page titled "40 Lines of HTML", the
+other "Document" — but they are not the same answer.
+
+The likely cause is numerical: verifying a batch of drafted tokens does not take
+the same floating-point path as decoding one at a time, and a near-tie between
+two tokens flips. That makes it distributionally sound and bit-wise different,
+which is fine for prose and worth knowing about for anything reproducible.
+
+**So it is a 1.4–1.7x on the model the app actually routes to, at the price of
+not being able to promise the same bytes twice.** Not enabled by default here,
+because it needs a llama.cpp process the app does not manage — but it is the one
+runtime lever in this whole investigation that pays.
 
 ## Measurement discipline
 
