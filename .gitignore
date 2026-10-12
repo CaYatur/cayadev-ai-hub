@@ -26,6 +26,8 @@ dist-ssr
 # Rust / Tauri build artifacts
 src-tauri/target/
 src-tauri/gen/
+*.exe
+*.msi
 
 # Benchmark output (machine-specific; committed results live in docs/)
 bench_results.json

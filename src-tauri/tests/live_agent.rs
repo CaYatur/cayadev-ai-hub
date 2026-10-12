@@ -830,7 +830,7 @@ async fn a_slow_model_writing_a_long_file_is_not_cut_off() {
             max_steps: 4,
             num_ctx: Some(CTX),
             params_billions: Some(27.0),
-            think: true,
+            think: Some(true),
             ..Default::default()
         },
     );

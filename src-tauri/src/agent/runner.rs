@@ -141,7 +141,7 @@ pub struct RunConfig {
     /// stops runs that are working, which is exactly what it used to do.
     pub max_steps: usize,
     pub num_ctx: Option<u32>,
-    pub think: bool,
+    pub think: Option<bool>,
     pub keep_alive: String,
     /// Identical call signatures tolerated before the run is abandoned.
     pub loop_threshold: usize,
@@ -167,7 +167,7 @@ impl Default for RunConfig {
             model: String::new(),
             max_steps: 80,
             num_ctx: None,
-            think: false,
+            think: None,
             // Long enough that a multi-step task never pays a reload. A cold
             // 27B load costs ~30 s and dwarfs everything else in a turn.
             keep_alive: "15m".into(),
@@ -280,7 +280,7 @@ impl AgentRunner {
                 // An empty list is not the same as no list: Ollama rejects a
                 // request that offers tools to a model without the capability.
                 tools: (!schemas.is_empty()).then(|| schemas.clone()),
-                think: self.config.think.then_some(true),
+                think: self.config.think,
                 format: None,
                 options: Some(Options {
                     num_ctx: self.config.num_ctx,
@@ -712,6 +712,7 @@ mod tests {
     #[test]
     fn the_ceiling_is_well_above_what_a_repair_costs() {
         assert!(RunConfig::default().max_steps >= 60);
+        assert_eq!(RunConfig::default().think, None);
     }
 
     #[test]

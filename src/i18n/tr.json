@@ -87,7 +87,9 @@
     "balanced": "Dengeli",
     "balanced_hint": "Düşünme yok, 80 adım.",
     "thorough": "Kapsamlı",
-    "thorough_hint": "Destekleyen modelde düşünme, 200 adım."
+    "thorough_hint": "Destekleyen modelde düşünme, 200 adım.",
+    "thinking": "Düşünme desteği",
+    "thinking_hint": "Modelin yanıt vermeden önce akıl yürütmesine izin ver."
   },
   "context": {
     "label": "Bağlam penceresi",

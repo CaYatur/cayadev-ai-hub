@@ -1,3 +1,43 @@
+# v0.2.5 — decide when a thinking model may reason
+
+Reasoning models like DeepSeek-R1 and QwQ can spend hundreds of tokens thinking
+before answering. Previously, whether the model was allowed to reason was tied
+strictly to the Effort setting: Thorough turned thinking on where supported,
+while Fast and Balanced forced it off.
+
+If you wanted Balanced's 80-step leash but needed the model to think through a
+complex refactor, or wanted Thorough's 200-step ceiling without paying the
+wall-clock penalty of chain-of-thought tokens on every turn, there was no way to
+separate them.
+
+## Explicit thinking toggle in the effort menu
+
+The Effort popover now inspects whether the active model advertises thinking
+capabilities (`capabilities.thinking`).
+
+- When the model **supports thinking**, a toggle appears in the Effort menu
+  below the step presets: **Thinking support** (*Düşünme desteği*).
+- Clicking the toggle lets you turn reasoning on or off independently of the
+  step ceiling.
+- Switching presets (Fast, Balanced, Thorough) sets sensible defaults (Fast and
+  Balanced disable thinking; Thorough enables it), which you can then toggle at
+  will.
+- When the model **does not support thinking**, the option is hidden so the
+  interface stays clean.
+
+## Honest request flags to Ollama
+
+When thinking is enabled on a capable model, the runner sends `"think": true`.
+When thinking is turned off, the runner now explicitly sends `"think": false`,
+instructing Ollama to suppress chain-of-thought tokens rather than relying on
+the model's built-in prompt template default. Non-thinking models omit the field
+entirely.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled.
+
 # v0.2.4 — a run that is working is not stopped
 
 A 20B repairing a Python file ran for fifteen minutes and stopped with

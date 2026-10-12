@@ -125,10 +125,11 @@ export const api = {
     model?: string,
     numCtx?: number,
     effort?: Effort,
+    thinking?: boolean,
     history?: Turn[],
     attachments?: string[],
   ) =>
-    invoke<string>("run_agent", { prompt, model, numCtx, effort, history, attachments }),
+    invoke<string>("run_agent", { prompt, model, numCtx, effort, thinking, history, attachments }),
   contextOptions: (model: string) => invoke<ContextOptions>("context_options", { model }),
   checkpointList: () => invoke<Checkpoint[]>("checkpoint_list"),
   checkpointRestore: (id: string) => invoke<string[]>("checkpoint_restore", { id }),

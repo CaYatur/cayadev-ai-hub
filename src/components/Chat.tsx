@@ -371,6 +371,7 @@ export default function Chat({
   assisted,
   model,
   effort,
+  thinking,
   numCtx,
   attachments,
   dropping,
@@ -390,6 +391,7 @@ export default function Chat({
   onAssisted,
   onModel,
   onEffort,
+  onThinking,
   onNumCtx,
   onRetry,
   onRemove,
@@ -407,6 +409,7 @@ export default function Chat({
   assisted: boolean;
   model: string;
   effort: Effort;
+  thinking: boolean;
   numCtx: number | null;
   attachments: Attachment[];
   dropping: boolean;
@@ -429,6 +432,7 @@ export default function Chat({
   onAssisted: (enabled: boolean) => void;
   onModel: (model: string) => void;
   onEffort: (effort: Effort) => void;
+  onThinking: (enabled: boolean) => void;
   onNumCtx: (n: number | null) => void;
   onRetry: (index: number) => void;
   onRemove: (index: number) => void;
@@ -543,6 +547,7 @@ export default function Chat({
     () => models.find((m) => m.name === effectiveModel) ?? null,
     [models, effectiveModel],
   );
+  const supportsThinking = Boolean(activeModel?.capabilities.thinking);
 
   useEffect(() => {
     let stale = false;
@@ -996,6 +1001,17 @@ export default function Chat({
                   }}
                 />
               ))}
+              {supportsThinking && (
+                <>
+                  <PopoverDivider />
+                  <PopoverItem
+                    label={t("effort.thinking")}
+                    hint={t("effort.thinking_hint")}
+                    selected={thinking}
+                    onClick={() => onThinking(!thinking)}
+                  />
+                </>
+              )}
             </Popover>
           </div>
         </div>

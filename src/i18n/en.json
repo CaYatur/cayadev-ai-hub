@@ -87,7 +87,9 @@
     "balanced": "Balanced",
     "balanced_hint": "No thinking, 80 steps.",
     "thorough": "Thorough",
-    "thorough_hint": "Thinking where supported, 200 steps."
+    "thorough_hint": "Thinking where supported, 200 steps.",
+    "thinking": "Thinking support",
+    "thinking_hint": "Allow the model to reason before answering."
   },
   "context": {
     "label": "Context window",

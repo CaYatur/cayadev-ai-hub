@@ -233,6 +233,7 @@ pub async fn run_agent(
     model: Option<String>,
     num_ctx: Option<u32>,
     effort: Option<Effort>,
+    thinking: Option<bool>,
     history: Option<Vec<Turn>>,
     attachments: Option<Vec<String>>,
 ) -> Result<String, String> {
@@ -307,8 +308,12 @@ pub async fn run_agent(
     let effort = effort.unwrap_or_default();
     // Thinking is only meaningful where the model advertises it; forcing it on
     // a model without the capability wastes tokens and confuses the parser.
-    let think = effort.wants_thinking()
-        && profile.map(|p| p.capabilities.thinking).unwrap_or(false);
+    let model_supports_thinking = profile.map(|p| p.capabilities.thinking).unwrap_or(false);
+    let think = if model_supports_thinking {
+        Some(thinking.unwrap_or_else(|| effort.wants_thinking()))
+    } else {
+        None
+    };
 
     // Several vision models cannot call tools at all — qwen2.5vl:7b advertises
     // `completion` and `vision` and nothing else — and Ollama refuses a request

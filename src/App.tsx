@@ -54,6 +54,7 @@ export default function App() {
   const [assisted, setAssistedState] = useState(true);
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState<Effort>("balanced");
+  const [thinking, setThinking] = useState(false);
   const [numCtx, setNumCtx] = useState<number | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [dropping, setDropping] = useState(false);
@@ -338,6 +339,11 @@ export default function App() {
     await api.setAssisted(enabled);
   }, []);
 
+  const changeEffort = useCallback((next: Effort) => {
+    setEffort(next);
+    setThinking(next === "thorough");
+  }, []);
+
   const run = useCallback(
     async (id: string, text: string, history: Turn[], files: Attachment[] = []) => {
       if (!active) return;
@@ -364,6 +370,7 @@ export default function App() {
           model || undefined,
           numCtx ?? undefined,
           effort,
+          thinking,
           history,
           files.map((f) => f.path),
         );
@@ -379,7 +386,7 @@ export default function App() {
         setQuestion(null);
       }
     },
-    [active, append, model, numCtx, effort],
+    [active, append, model, numCtx, effort, thinking],
   );
 
   const send = useCallback(
@@ -574,6 +581,7 @@ export default function App() {
             assisted={assisted}
             model={model}
             effort={effort}
+            thinking={thinking}
             numCtx={numCtx}
             onSend={send}
             onAnswer={answer}
@@ -583,7 +591,8 @@ export default function App() {
             onMode={changeMode}
             onAssisted={changeAssisted}
             onModel={setModel}
-            onEffort={setEffort}
+            onEffort={changeEffort}
+            onThinking={setThinking}
             onNumCtx={setNumCtx}
             attachments={attachments}
             liveTokens={liveTokens}
