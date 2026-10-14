@@ -540,6 +540,16 @@ impl ToolExecutor for WorkspaceTools {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn truncation_is_safe_on_turkish_and_emoji_at_every_limit() {
+        let text = "Çalan şarkı: Ğüşİöç 🎵🎶 — ışık ğ".repeat(3);
+        for limit in 0..=text.len() + 1 {
+            let out = super::truncate(&text, limit, "bytes");
+            let kept = out.split("\n\n[truncated").next().unwrap();
+            assert!(text.starts_with(kept) && kept.len() <= limit.min(text.len()), "{limit}");
+        }
+    }
+
     use super::*;
     use crate::perms::{Decision, PermissionEngine, PermissionMode};
     use serde_json::json;

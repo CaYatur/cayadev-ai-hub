@@ -57,7 +57,7 @@ export function newSession(workspace: string | null = null): Session {
 export function titleFrom(text: string): string {
   const firstLine = text.trim().split("\n")[0].trim();
   if (!firstLine) return "New session";
-  return firstLine.length > 48 ? `${firstLine.slice(0, 48)}…` : firstLine;
+  return firstLine.length > 48 ? `${headChars(firstLine, 48)}…` : firstLine;
 }
 
 export function load(): Session[] {
@@ -132,7 +132,15 @@ export function groupByAge(sessions: Session[]): [string, Session[]][] {
 
 /// One-line summary for a collapsed tool row.
 export function summarize(call: ProposedCall, output?: string): string {
-  const args = call.arguments as Record<string, string | undefined>;
+  // Arguments come from a model; never trust their shape in a render path.
+  const raw = (call.arguments ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string | undefined =>
+    v === undefined || v === null ? undefined : typeof v === "string" ? v : JSON.stringify(v);
+  const args = {
+    path: str(raw.path),
+    content: str(raw.content),
+    command: str(raw.command),
+  };
   switch (call.name) {
     case "read_file":
       return `Read ${args.path ?? "a file"}`;
@@ -178,7 +186,25 @@ const MAX_TURN_CHARS = 1500;
 function clamp(text: string): string {
   if (text.length <= MAX_TURN_CHARS) return text;
   const half = Math.floor(MAX_TURN_CHARS / 2);
-  return `${text.slice(0, half)}\n…\n${text.slice(-half)}`;
+  return `${headChars(text, half)}\n…\n${tailChars(text, half)}`;
+}
+
+const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff;
+const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff;
+
+/// `slice` counts UTF-16 units, so a cut can land inside an emoji and leave a
+/// lone surrogate. The backend's JSON parser rejects one, and the whole run
+/// failed with "invalid args `history`". These step back to a whole character.
+export function headChars(text: string, n: number): string {
+  let end = Math.min(n, text.length);
+  if (end > 0 && end < text.length && isHigh(text.charCodeAt(end - 1))) end -= 1;
+  return text.slice(0, end);
+}
+
+export function tailChars(text: string, n: number): string {
+  let start = Math.max(0, text.length - n);
+  if (start > 0 && start < text.length && isLow(text.charCodeAt(start))) start += 1;
+  return text.slice(start);
 }
 
 /// Flatten a transcript into the exchanges worth replaying to the model.

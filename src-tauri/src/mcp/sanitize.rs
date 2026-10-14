@@ -254,6 +254,30 @@ pub fn render(result: &Value, max_chars: usize) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_cut_is_safe_on_turkish_and_emoji() {
+        let text = "Çalan şarkı Ğüşİöç 🎵🎶 ışık ".repeat(400);
+        for limit in [0, 1, 2, 3, 5, 17, 100, 2001, 9999] {
+            let _ = super::cap(&text, limit);
+            let _ = super::clip(&text, limit);
+        }
+        let _ = super::clean_text(&text);
+        let mut v = serde_json::json!({"başlık": text, "liste": vec!["ğ"; 40], "🎵": {"ş": "ç".repeat(5000)}});
+        super::clean_value(&mut v);
+        let out = super::render(&serde_json::json!({"content":[{"type":"text","text": v.to_string()}]}), 3000).unwrap();
+        assert!(out.chars().count() < 3_300, "{}", out.chars().count());
+    }
+
+    #[test]
+    fn very_deep_json_does_not_overflow_the_stack() {
+        let mut v = serde_json::json!("leaf");
+        for _ in 0..100 {
+            v = serde_json::json!({"a": [v]});
+        }
+        super::clean_value(&mut v);
+        let _ = super::render(&serde_json::json!({"structuredContent": v}), 5000);
+    }
+
     use super::*;
     use serde_json::json;
 

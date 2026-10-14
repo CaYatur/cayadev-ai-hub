@@ -65,5 +65,8 @@ tokio-test = "0.4"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# Unwind, not abort. With abort, one panic in any task (a tool call, an MCP
+# client, a stream parser) ended the whole process with no message. Unwinding
+# lets a run fail on its own and the panic hook record what happened.
+panic = "unwind"
 strip = true

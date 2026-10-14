@@ -8,6 +8,7 @@ pub mod agent;
 pub mod checkpoint;
 pub mod mcp;
 pub mod commands;
+pub mod crashlog;
 pub mod ollama;
 pub mod perms;
 pub mod proc;
@@ -16,6 +17,8 @@ pub mod tools;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, so even a panic during startup leaves a report.
+    crashlog::install();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
@@ -30,6 +33,9 @@ pub fn run() {
             // MCP servers live in the app's config directory, next to the
             // store the frontend uses.
             use tauri::Manager;
+            if let Ok(dir) = app.path().app_log_dir() {
+                crashlog::set_dir(dir);
+            }
             if let Ok(dir) = app.path().app_config_dir() {
                 let state = app.state::<commands::AppState>();
                 let mcp = state.mcp.clone();
@@ -62,6 +68,8 @@ pub fn run() {
             commands::mcp_test_server,
             commands::mcp_status,
             commands::mcp_list_tools,
+            commands::report_frontend_error,
+            commands::crash_log_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -363,6 +363,15 @@ fn truncate_on_boundary(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn boundary_truncation_is_safe_on_turkish_and_emoji() {
+        let text = "Çalan şarkıyı oku ğüşİöç 🎵🎶 ışık çiçek".repeat(4);
+        for limit in 0..=text.chars().count() + 1 {
+            let out = super::truncate_on_boundary(&text, limit);
+            assert!(out.chars().count() <= limit, "{limit}: {out}");
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

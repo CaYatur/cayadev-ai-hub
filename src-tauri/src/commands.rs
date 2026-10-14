@@ -448,7 +448,23 @@ pub async fn run_agent(
         slowest
     });
 
-    let reason: StopReason = runner.run(&prompt, &mut tools, gate.as_ref(), tx).await;
+    // A bug anywhere in a run must cost the run, not the app. The panic hook
+    // has already written the details to crash.log by the time this sees it.
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        runner.run(&prompt, &mut tools, gate.as_ref(), tx),
+    ))
+    .await;
+    let reason: StopReason = match outcome {
+        Ok(reason) => reason,
+        Err(payload) => {
+            let _ = pump.await;
+            return Err(format!(
+                "Internal error, the run was stopped: {}. Details: {}",
+                crate::crashlog::payload_text(payload.as_ref()),
+                crate::crashlog::log_path().display()
+            ));
+        }
+    };
     if let Ok(Some(measured)) = pump.await {
         let mut profiles = state.profiles.write().await;
         if let Some(p) = profiles.iter_mut().find(|p| p.name == chosen) {
@@ -457,6 +473,20 @@ pub async fn run_agent(
     }
 
     Ok(format!("{reason:?}"))
+}
+
+/// Record an error the frontend caught, next to backend panics.
+#[tauri::command]
+pub fn report_frontend_error(message: String) {
+    // Bounded: a runaway error loop must not fill the disk.
+    let message: String = message.chars().take(8_000).collect();
+    crate::crashlog::append("frontend", &message);
+}
+
+/// Where crash reports are written, for the error screen to point at.
+#[tauri::command]
+pub fn crash_log_path() -> String {
+    crate::crashlog::log_path().display().to_string()
 }
 
 // ---------------------------------------------------------------------------
