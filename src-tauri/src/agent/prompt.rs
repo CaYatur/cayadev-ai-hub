@@ -153,7 +153,8 @@ pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
         return tools.to_vec();
     }
 
-    let mut chosen: Vec<Tool> = Vec::with_capacity(budget);
+    // The Full tier's budget is usize::MAX, so never size the allocation by it.
+    let mut chosen: Vec<Tool> = Vec::with_capacity(budget.min(tools.len()));
     let take = |name: &str, chosen: &mut Vec<Tool>| {
         if chosen.len() < budget && !chosen.iter().any(|c| c.function.name == name) {
             if let Some(tool) = tools.iter().find(|t| t.function.name == name) {
@@ -547,6 +548,15 @@ mod tests {
                 assert!(chosen.iter().any(|t| t.function.name == *core), "{tier:?} dropped {core}");
             }
         }
+    }
+
+    #[test]
+    fn full_tier_with_more_mcp_tools_than_its_cap_does_not_overflow() {
+        let mut all: Vec<Tool> = CORE_TOOLS.iter().map(|n| mcp_named(n)).collect();
+        all.extend((0..60).map(|i| mcp_named(&format!("mcp__srv__t{i}"))));
+        let chosen = select_tools(&all, PromptTier::Full);
+        let mcp = chosen.iter().filter(|t| t.function.name.starts_with("mcp__")).count();
+        assert_eq!(mcp, PromptTier::Full.mcp_budget());
     }
 
     #[test]
