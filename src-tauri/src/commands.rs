@@ -369,7 +369,8 @@ pub async fn run_agent(
         .map(|s| s.id.clone())
         .collect();
     let mut tools =
-        crate::mcp::tools::WithMcp::new(workspace_tools, state.mcp.clone(), mcp_tools, auto_approve);
+        crate::mcp::tools::WithMcp::new(workspace_tools, state.mcp.clone(), mcp_tools, auto_approve)
+            .with_context(Some(context));
     let mut perms = PermissionEngine::new(&workspace, mode);
     for file in state.attachments.read().await.iter() {
         // The file itself, not its directory — dropping one file from Downloads

@@ -76,12 +76,12 @@ async fn stdio_server_lists_and_calls_tools() {
     let echo = tools.iter().find(|t| t.name == "echo").unwrap();
     assert_eq!(echo.exposed, "mcp__everything__echo");
 
-    let out = manager.call("everything", "echo", &args(json!({"message": "merhaba"}))).await.expect("echo");
+    let out = manager.call("everything", "echo", &args(json!({"message": "merhaba"})), 8000).await.expect("echo");
     println!("tools/call echo -> {out}");
     assert!(out.contains("merhaba"));
 
     // A server-side failure comes back as a tool error, not a panic.
-    let err = manager.call("everything", "no-such-tool", &Map::new()).await;
+    let err = manager.call("everything", "no-such-tool", &Map::new(), 8000).await;
     println!("unknown tool -> {err:?}");
     assert!(err.is_err());
 
@@ -174,7 +174,7 @@ async fn http_server_lists_calls_and_survives_a_restart() {
     let (tools, errors) = manager.tools_for_agent().await;
     assert!(errors.is_empty(), "{errors:?}");
     println!("http tools/list: {} tools", tools.len());
-    let out = manager.call("web", "echo", &args(json!({"message": "http-ok"}))).await.expect("echo");
+    let out = manager.call("web", "echo", &args(json!({"message": "http-ok"})), 8000).await.expect("echo");
     assert!(out.contains("http-ok"), "{out}");
 
     // Restart the server: the old session is gone, so the next call has to
@@ -182,7 +182,7 @@ async fn http_server_lists_calls_and_survives_a_restart() {
     kill_tree(&mut child);
     let mut child = spawn_http(port);
     wait_for_port(port).await;
-    let out = manager.call("web", "echo", &args(json!({"message": "after-restart"}))).await;
+    let out = manager.call("web", "echo", &args(json!({"message": "after-restart"})), 8000).await;
     println!("after restart -> {out:?}");
     kill_tree(&mut child);
     manager.shutdown_all().await;
@@ -328,4 +328,128 @@ async fn agent_uses_a_builtin_tool_in_text_mode() {
     assert_eq!(reason, StopReason::Completed);
     assert!(calls.iter().any(|c| c == "read_file"), "{calls:?}");
     assert!(text.contains("PELICAN-902"), "{text}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn image_results_from_a_real_server_become_placeholders() {
+    let (manager, dir) = manager_with(everything_stdio(), "image").await;
+    let out = manager.call("everything", "get-tiny-image", &Map::new(), 8000).await.expect("image tool");
+    println!("get-tiny-image -> {out}");
+    assert!(out.contains("[image omitted, image/png"), "{out}");
+    assert!(out.len() < 1_000, "{} chars", out.len());
+    let out = manager.call("everything", "gzip-file-as-resource", &Map::new(), 8000).await;
+    println!("gzip-file-as-resource -> {out:?}");
+    manager.shutdown_all().await;
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A minimal stdio MCP server, no dependencies, whose one tool answers with
+/// the shape from the bug report: metadata plus a ~400 KB data URI.
+const FAKE_SERVER: &str = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+const art = 'data:image/png;base64,' + Buffer.alloc(300000, 7).toString('base64');
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\n');
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id === undefined) return;
+  if (msg.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion,
+      capabilities: { tools: {} }, serverInfo: { name: 'fake-player', version: '1.0.0' } } });
+  } else if (msg.method === 'tools/list') {
+    send({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'get_now_playing',
+      description: 'What is playing right now', annotations: { readOnlyHint: true },
+      inputSchema: { type: 'object', properties: {} } }] } });
+  } else if (msg.method === 'tools/call') {
+    const body = { ok: true, nowPlaying: { title: 'Save Your Tears', artist: 'The Weeknd', artwork: art } };
+    send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(body) }] } });
+  } else {
+    send({ jsonrpc: '2.0', id: msg.id, result: {} });
+  }
+});
+"#;
+
+async fn now_playing_run(native_tools: bool) {
+    let model = std::env::var("MCP_TEST_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
+    let dir = scratch("np");
+    let script = dir.join("fake-player.js");
+    std::fs::write(&script, FAKE_SERVER).unwrap();
+    let server = ServerConfig {
+        id: "player".into(),
+        name: "Player".into(),
+        transport: Transport::Stdio {
+            command: "node".into(),
+            args: vec![script.display().to_string()],
+            env: BTreeMap::new(),
+            cwd: None,
+        },
+        ..everything_stdio()
+    };
+    let (manager, cfg_dir) = manager_with(server, "np-cfg").await;
+    let (mcp_tools, errors) = manager.tools_for_agent().await;
+    assert!(errors.is_empty(), "{errors:?}");
+
+    let workspace = scratch("np-ws");
+    let mut tools = WithMcp::new(
+        WorkspaceTools::without_checkpoints(&workspace),
+        manager.clone(),
+        mcp_tools,
+        vec!["player".into()],
+    )
+    .with_context(Some(8192));
+    let runner = AgentRunner::new(
+        OllamaClient::new(DEFAULT_HOST, Timeouts::default()),
+        PermissionEngine::new(&workspace, PermissionMode::Balanced),
+        RunConfig {
+            model: model.clone(),
+            num_ctx: Some(8192),
+            think: Some(false),
+            params_billions: Some(4.0),
+            max_steps: 6,
+            native_tools,
+            ..Default::default()
+        },
+    );
+    let (tx, mut rx) = mpsc::channel(512);
+    let collector = tokio::spawn(async move {
+        let mut outputs = Vec::new();
+        let mut text = String::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::ToolProposed { call } => println!("-> {} via {:?}", call.name, call.recovery),
+                AgentEvent::ToolSettled { output, .. } => {
+                    println!("<- {output}");
+                    outputs.push(output);
+                }
+                AgentEvent::Token { text: t } => text.push_str(&t),
+                _ => {}
+            }
+        }
+        (outputs, text)
+    });
+    let reason = runner
+        .run("Which song is playing right now? Use the player tool.", &mut tools, &Approve, tx)
+        .await;
+    let (outputs, text) = collector.await.unwrap();
+    println!("model {model}, native_tools={native_tools}: {reason:?}\nfinal text: {text}");
+    manager.shutdown_all().await;
+    for d in [&dir, &cfg_dir, &workspace] {
+        std::fs::remove_dir_all(d).ok();
+    }
+    assert_eq!(reason, StopReason::Completed);
+    assert!(outputs.iter().all(|o| o.len() < 1_000), "a result reached the model unsanitized");
+    assert!(outputs.iter().any(|o| o.contains("[image omitted")), "{outputs:?}");
+    assert!(text.contains("Save Your Tears"), "{text}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_huge_artwork_result_does_not_derail_the_model_native() {
+    now_playing_run(true).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn a_huge_artwork_result_does_not_derail_the_model_text_mode() {
+    now_playing_run(false).await;
 }
