@@ -1,3 +1,32 @@
+# v0.2.8 - crashes are caught and logged
+
+The app could vanish mid-use with no message. The release build aborted on any
+panic, and nothing was ever written to disk, so there was no trace to follow.
+
+## The cause that was found
+
+With more than 40 MCP tools connected, the Full prompt tier sized a list by an
+unlimited budget and the allocation overflowed ("capacity overflow"). That run
+now works, and a test covers it.
+
+## A crash no longer closes the app
+
+- A panic now fails only the current run, with an error message in the chat.
+- Panics, render errors and unhandled promise rejections are written to
+  `crash.log` in `%LOCALAPPDATA%\com.cayadev.aihub\logs` (rotated at 1 MB).
+- A render error shows a recovery screen with "try again" and "reload"
+  instead of a blank window.
+
+## Smaller fixes
+
+- Turkish characters and emoji are no longer cut in half when text is
+  shortened, which could break a saved conversation.
+- Tool summaries no longer assume a model's arguments are strings.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled. MCP servers started through `npx` need Node.js.
 # v0.2.7 — MCP results no longer flood the model
 
 An MCP tool can return far more than a model can usefully read. A music
