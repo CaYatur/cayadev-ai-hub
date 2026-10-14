@@ -2137,3 +2137,22 @@
   min-width: 0;
   flex: 1;
 }
+
+/* Shown instead of a blank window when a render throws. */
+.crash-screen {
+  max-width: 640px;
+  margin: 12vh auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.crash-screen pre {
+  white-space: pre-wrap;
+  max-height: 30vh;
+  overflow: auto;
+}
+.crash-actions {
+  display: flex;
+  gap: 8px;
+}

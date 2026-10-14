@@ -211,5 +211,12 @@
     "toolsFound": "{{count}} araç",
     "toolsForAgent": "Ajanın kullanabileceği araçlar",
     "readOnly": "salt okunur"
+  },
+  "crash": {
+    "title": "Bir şeyler ters gitti",
+    "body": "Pencere bir hatayla karşılaştı ve çizimi durdurdu. Oturumların kayıtlı. Yeniden dene ya da pencereyi yeniden yükle.",
+    "logAt": "Ayrıntılar şuraya yazıldı:",
+    "retry": "Yeniden dene",
+    "reload": "Pencereyi yeniden yükle"
   }
 }

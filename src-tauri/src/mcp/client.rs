@@ -403,8 +403,19 @@ pub fn exposed_name(server_id: &str, tool: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect();
     let mut name = format!("{TOOL_PREFIX}{server_id}__{clean}");
-    name.truncate(MAX_TOOL_NAME);
+    truncate_bytes(&mut name, MAX_TOOL_NAME);
     name
+}
+
+/// `String::truncate` panics inside a multi-byte character. Saved ids are
+/// ASCII slugs, but this is a public function on the tool path, so it cuts on
+/// a boundary rather than trusting every caller.
+fn truncate_bytes(s: &mut String, max: usize) {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 /// Turn the server's `tools/list` entries into what the agent sees.
@@ -418,7 +429,7 @@ pub fn describe_tools(server: &ServerConfig, raw: &[Value]) -> Vec<McpTool> {
         while out.iter().any(|o| o.exposed == exposed) {
             let suffix = format!("_{n}");
             exposed = exposed_name(&server.id, name);
-            exposed.truncate(MAX_TOOL_NAME - suffix.len());
+            truncate_bytes(&mut exposed, MAX_TOOL_NAME - suffix.len());
             exposed.push_str(&suffix);
             n += 1;
         }
@@ -471,6 +482,19 @@ pub fn render_result(result: &Value, max_chars: usize) -> Result<String, String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exposed_names_never_split_a_character() {
+        // A non-ASCII id (from a hand-edited mcp.json) used to panic here.
+        // Every offset, so some cut lands inside a two- and a four-byte char.
+        for pad in 0..4 {
+            for body in ["ç", "🎵"] {
+                let id = format!("{}{}", "a".repeat(pad), body.repeat(40));
+                let name = super::exposed_name(&id, "get_now_playing");
+                assert!(name.len() <= super::MAX_TOOL_NAME, "{name}");
+            }
+        }
+    }
+
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;

@@ -211,5 +211,12 @@
     "toolsFound": "{{count}} tools",
     "toolsForAgent": "Tools the agent can use",
     "readOnly": "read-only"
+  },
+  "crash": {
+    "title": "Something went wrong",
+    "body": "The window hit an error and stopped drawing. Your sessions are saved. Try again, or reload the window.",
+    "logAt": "Details were written to",
+    "retry": "Try again",
+    "reload": "Reload window"
   }
 }
