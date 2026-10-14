@@ -15,12 +15,26 @@ pub struct WithMcp<T: ToolExecutor> {
     manager: Arc<McpManager>,
     tools: Vec<McpTool>,
     auto_approve: Vec<String>,
+    /// Characters of one result handed back to the model.
+    result_cap: usize,
 }
 
 impl<T: ToolExecutor> WithMcp<T> {
     /// `auto_approve` lists server ids whose tools run without asking.
     pub fn new(inner: T, manager: Arc<McpManager>, tools: Vec<McpTool>, auto_approve: Vec<String>) -> Self {
-        Self { inner, manager, tools, auto_approve }
+        Self {
+            inner,
+            manager,
+            tools,
+            auto_approve,
+            result_cap: super::sanitize::cap_for_context(None),
+        }
+    }
+
+    /// Size results for a model with `num_ctx` tokens of context.
+    pub fn with_context(mut self, num_ctx: Option<u32>) -> Self {
+        self.result_cap = super::sanitize::cap_for_context(num_ctx);
+        self
     }
 
     fn find(&self, name: &str) -> Option<&McpTool> {
@@ -66,7 +80,12 @@ impl<T: ToolExecutor> ToolExecutor for WithMcp<T> {
 
     async fn execute(&self, name: &str, args: &Map<String, Value>) -> Result<String, String> {
         match self.find(name) {
-            Some(t) => self.manager.call(&t.server_id, &t.name, args).await,
+            // Errors are server text too, and can carry the same payloads.
+            Some(t) => self
+                .manager
+                .call(&t.server_id, &t.name, args, self.result_cap)
+                .await
+                .map_err(|e| super::sanitize::cap(&super::sanitize::clean_text_or_json(&e), self.result_cap)),
             None => self.inner.execute(name, args).await,
         }
     }

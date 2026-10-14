@@ -25,8 +25,6 @@ use super::TOOL_PREFIX;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-/// Largest tool result handed back to the model, in bytes.
-const MAX_RESULT_BYTES: usize = 20_000;
 /// Tool names are limited to 64 characters by most providers.
 const MAX_TOOL_NAME: usize = 64;
 /// Last bytes of a stdio server's stderr kept for error messages.
@@ -205,7 +203,15 @@ impl McpManager {
     }
 
     /// Call one tool. `Err` is a message for the model, not a crash.
-    pub async fn call(&self, server_id: &str, tool: &str, args: &Map<String, Value>) -> Result<String, String> {
+    /// `max_chars` caps the result handed back; see
+    /// [`super::sanitize::cap_for_context`].
+    pub async fn call(
+        &self,
+        server_id: &str,
+        tool: &str,
+        args: &Map<String, Value>,
+        max_chars: usize,
+    ) -> Result<String, String> {
         let server = self
             .config
             .read()
@@ -224,7 +230,7 @@ impl McpManager {
                 Err(_) => return Err(format!("`{tool}` timed out after {}s", timeout.as_secs())),
                 Ok(Ok(result)) => {
                     let value = serde_json::to_value(&result).unwrap_or(Value::Null);
-                    return render_result(&value);
+                    return render_result(&value, max_chars);
                 }
                 Ok(Err(e)) if attempt == 0 && is_transport_error(&e) => {
                     tracing::warn!("MCP `{}` dropped ({e}); reconnecting", server.name);
@@ -456,58 +462,11 @@ fn clean_schema(schema: Value) -> Value {
     Value::Object(obj)
 }
 
-/// Flatten a `tools/call` result into text for the model.
-pub fn render_result(result: &Value) -> Result<String, String> {
-    let mut parts: Vec<String> = Vec::new();
-    for block in result.get("content").and_then(Value::as_array).into_iter().flatten() {
-        match block.get("type").and_then(Value::as_str) {
-            Some("text") => parts.push(block.get("text").and_then(Value::as_str).unwrap_or("").to_string()),
-            Some("image") | Some("audio") => {
-                let kind = block.get("type").and_then(Value::as_str).unwrap_or("media");
-                let mime = block.get("mimeType").and_then(Value::as_str).unwrap_or("unknown");
-                let size = block.get("data").and_then(Value::as_str).map_or(0, |d| d.len() * 3 / 4);
-                parts.push(format!("[{kind}: {mime}, about {size} bytes, not shown]"));
-            }
-            Some("resource") => {
-                let r = block.get("resource").cloned().unwrap_or(Value::Null);
-                match r.get("text").and_then(Value::as_str) {
-                    Some(text) => parts.push(text.to_string()),
-                    None => parts.push(format!(
-                        "[resource {}]",
-                        r.get("uri").and_then(Value::as_str).unwrap_or("?")
-                    )),
-                }
-            }
-            Some("resource_link") => parts.push(format!(
-                "[link {}]",
-                block.get("uri").and_then(Value::as_str).unwrap_or("?")
-            )),
-            _ => parts.push(block.to_string()),
-        }
-    }
-    if parts.iter().all(|p| p.trim().is_empty()) {
-        if let Some(s) = result.get("structuredContent").filter(|v| !v.is_null()) {
-            parts = vec![s.to_string()];
-        }
-    }
-    let mut text = parts.join("\n");
-    if text.trim().is_empty() {
-        text = "(no output)".into();
-    }
-    if text.len() > MAX_RESULT_BYTES {
-        let mut end = MAX_RESULT_BYTES;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let total = text.len();
-        text.truncate(end);
-        text.push_str(&format!("\n\n[truncated — {end} of {total} bytes shown]"));
-    }
-    if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
-        Err(text)
-    } else {
-        Ok(text)
-    }
+/// Flatten a `tools/call` result into sanitized text for the model.
+///
+/// See [`super::sanitize`]; kept here so existing callers keep their name.
+pub fn render_result(result: &Value, max_chars: usize) -> Result<String, String> {
+    super::sanitize::render(result, max_chars)
 }
 
 #[cfg(test)]
@@ -564,16 +523,16 @@ mod tests {
     fn results_are_flattened_and_errors_are_errors() {
         let ok = json!({"content": [{"type": "text", "text": "hello"},
                                     {"type": "image", "mimeType": "image/png", "data": "AAAA"}]});
-        let text = render_result(&ok).unwrap();
-        assert!(text.starts_with("hello\n[image: image/png"), "{text}");
+        let text = render_result(&ok, 20_000).unwrap();
+        assert!(text.starts_with("hello\n[image omitted, image/png"), "{text}");
 
         let structured = json!({"content": [], "structuredContent": {"sum": 3}});
-        assert_eq!(render_result(&structured).unwrap(), "{\"sum\":3}");
+        assert_eq!(render_result(&structured, 20_000).unwrap(), "{\"sum\":3}");
 
         let err = json!({"content": [{"type": "text", "text": "boom"}], "isError": true});
-        assert_eq!(render_result(&err).unwrap_err(), "boom");
+        assert_eq!(render_result(&err, 20_000).unwrap_err(), "boom");
 
-        let big = json!({"content": [{"type": "text", "text": "a".repeat(MAX_RESULT_BYTES + 10)}]});
-        assert!(render_result(&big).unwrap().contains("[truncated"));
+        let big = json!({"content": [{"type": "text", "text": "a b ".repeat(10_000)}]});
+        assert!(render_result(&big, 20_000).unwrap().contains("[truncated"));
     }
 }

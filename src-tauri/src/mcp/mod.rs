@@ -17,6 +17,7 @@
 
 pub mod client;
 pub mod config;
+pub mod sanitize;
 pub mod schema;
 pub mod tools;
 
