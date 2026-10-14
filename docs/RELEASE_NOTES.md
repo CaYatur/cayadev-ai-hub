@@ -1,3 +1,91 @@
+# v0.2.6 — the agent can use MCP tools
+
+Everything the agent could do was built into the app: files, commands, GitHub,
+the web, documents, the screen. A tool that lived anywhere else - a database, a
+ticket tracker, a company API - needed a code change. The Model Context Protocol
+is the standard way to offer such tools, and the app had no way to reach it:
+no MCP client, and nowhere to add a server.
+
+## An MCP page
+
+A new **MCP** tab lists your servers. **Add server** opens a form, and two
+presets (**Everything** for a quick test, **Filesystem** starting at your
+Documents folder) fill it in for you.
+
+- **Test connection** starts the server once and lists the tools it offers,
+  before anything is saved.
+- **Agent can use this server** (*Ajan bu sunucuyu kullanabilir*) attaches or
+  detaches a whole server; a tick box per tool switches single tools off.
+- Servers start the first time the agent needs one, not when the app opens, and
+  every server process is closed when the app exits.
+- A server that fails to start is reported in the chat; the run continues with
+  the tools that did load.
+
+Settings are saved as `mcp.json` in the app's config folder.
+
+## Two transports
+
+| Transport | For | Settings |
+| --- | --- | --- |
+| stdio | A local command | command, arguments, environment, working directory |
+| Streamable HTTP | A remote server | URL, headers, bearer token |
+
+`npx` and other `.cmd` launchers work as commands on Windows. The older
+HTTP+SSE transport is not supported. Every connect, list and call has a timeout
+(per server, 60 s by default), and a call that finds its connection dropped
+reconnects once before reporting an error.
+
+The client is the official Rust SDK, `rmcp`.
+
+## Permissions
+
+An MCP tool does whatever its server says it does, so the rules lean on what
+the server declares and on what you decided:
+
+- Tools the server marks **read-only** run without asking in Project auto and
+  Balanced.
+- Every other tool asks first, unless the server is set to **Run tools without
+  asking** (*Araçları sormadan çalıştır*).
+- Autonomous and Unrestricted run them like any other tool.
+
+## Tools for models that cannot call them
+
+A model without native tool calling used to get no tools at all. It now gets
+all of them, built-in and MCP, described in the system prompt with one strict
+format:
+
+```json
+{"name": "<tool name>", "arguments": {...}}
+```
+
+Results come back as ordinary messages, which every template understands.
+The existing parser already rescues fenced blocks, trailing prose and broken
+JSON, so a near miss still becomes a call. Models with native tool calling are
+unchanged, and a vision-only model asked about an attached image still gets no
+tools.
+
+MCP tools get their own room in the trimmed tool list - 4, 10 or 40 depending on
+model size - so attaching a server does not push out the built-in tools, and a
+small model is not handed forty schemas.
+
+## Arguments are checked before the call
+
+Every call, built-in or MCP, is checked against the tool's input schema:
+required arguments, types, allowed values and unknown keys. Harmless slips are
+repaired in place - `"5"` for 5, `"true"` for true, one value where a list was
+expected. Anything else goes back to the model as one line it can act on, with
+the signature it should have used:
+
+```text
+Error: invalid arguments for `mcp__files__search`: `depth` must be integer, got a string ("deep").
+Call it again with corrected arguments. Expected: mcp__files__search(path: string*, depth: integer).
+```
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled. MCP servers started through `npx` need Node.js.
+
 # v0.2.5 — decide when a thinking model may reason
 
 Reasoning models like DeepSeek-R1 and QwQ can spend hundreds of tokens thinking
