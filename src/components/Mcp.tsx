@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { documentDir, homeDir } from "@tauri-apps/api/path";
 import {
   blankServer,
   formatPairs,
@@ -14,10 +15,10 @@ import {
 } from "../lib/mcp";
 
 /** Ready-made servers, so a first test does not start from a blank form. */
-const PRESETS: { key: string; server: () => McpServer }[] = [
+const PRESETS: { key: string; server: () => Promise<McpServer> }[] = [
   {
     key: "everything",
-    server: () => ({
+    server: async () => ({
       ...blankServer(),
       name: "Everything",
       transport: {
@@ -30,18 +31,33 @@ const PRESETS: { key: string; server: () => McpServer }[] = [
   },
   {
     key: "filesystem",
-    server: () => ({
+    server: async () => ({
       ...blankServer(),
       name: "Filesystem",
       transport: {
         kind: "stdio",
         command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users"],
+        // The user's Documents folder, resolved on this machine. It is only a
+        // starting point: the argument stays editable before saving.
+        args: ["-y", "@modelcontextprotocol/server-filesystem", await userFolder()],
         env: {},
       },
     }),
   },
 ];
+
+async function userFolder(): Promise<string> {
+  const trim = (p: string) => p.replace(/[\\/]+$/, "");
+  try {
+    return trim(await documentDir());
+  } catch {
+    try {
+      return trim(await homeDir());
+    } catch {
+      return ".";
+    }
+  }
+}
 
 type Draft = {
   /** Index in the saved list, or `null` for a new server. */
@@ -186,7 +202,7 @@ export default function Mcp() {
             {t("mcpView.add")}
           </button>
           {PRESETS.map((p) => (
-            <button key={p.key} className="btn" onClick={() => setDraft(toDraft(p.server(), null))}>
+            <button key={p.key} className="btn" onClick={async () => setDraft(toDraft(await p.server(), null))}>
               {t(`mcpView.preset.${p.key}`)}
             </button>
           ))}

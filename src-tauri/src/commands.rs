@@ -331,12 +331,8 @@ pub async fn run_agent(
         let _ = app.emit("agent://event", &AgentEvent::Error { message });
     }
 
-    // A model without native tool support used to get no tools at all. With
-    // MCP tools attached it gets them in text mode instead: described in the
-    // prompt, called with one strict JSON format the parser is tolerant of.
-    // Without MCP tools nothing changes, so a vision-only model answering
-    // about a screenshot behaves exactly as before.
-    let tools_enabled = native_tools || !mcp_tools.is_empty();
+    let ToolMode { enabled: tools_enabled, native: native_tools } =
+        ToolMode::choose(native_tools, !images.is_empty(), !mcp_tools.is_empty());
 
     let classifier = policy.get(TaskClass::Classify).map(str::to_string);
     let assisted = *state.assisted_approval.read().await;
@@ -502,6 +498,32 @@ pub async fn mcp_list_tools(
     state: State<'_, AppState>,
 ) -> Result<(Vec<crate::mcp::McpTool>, Vec<String>), String> {
     Ok(state.mcp.tools_for_agent().await)
+}
+
+/// How tools are offered to the model for one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolMode {
+    /// Whether any tools are offered.
+    pub enabled: bool,
+    /// Through the API (`true`) or described in the prompt as JSON (`false`).
+    pub native: bool,
+}
+
+impl ToolMode {
+    /// A model with native tool support is unaffected. One without it used
+    /// to get no tools at all; it now gets them in text mode — described in
+    /// the prompt, called with one strict JSON format the parser tolerates —
+    /// and Ollama never sees a `tools` field it would refuse.
+    ///
+    /// One exception: a vision-only model handed an image, with no MCP tools
+    /// attached, still gets none. That run is "describe this picture", and a
+    /// tool list in the prompt only invites a 7B to call `read_file` on it.
+    pub fn choose(model_has_tools: bool, has_images: bool, has_mcp_tools: bool) -> Self {
+        if model_has_tools {
+            return Self { enabled: true, native: true };
+        }
+        Self { enabled: !has_images || has_mcp_tools, native: false }
+    }
 }
 
 /// How much the agent should spend on a task.
@@ -845,4 +867,31 @@ pub async fn attach_bytes(
         path: target.display().to_string(),
         source: "clipboard".into(),
     })
+}
+
+
+#[cfg(test)]
+mod tool_mode_tests {
+    use super::ToolMode;
+
+    #[test]
+    fn native_models_are_unaffected() {
+        for images in [false, true] {
+            for mcp in [false, true] {
+                assert_eq!(ToolMode::choose(true, images, mcp), ToolMode { enabled: true, native: true });
+            }
+        }
+    }
+
+    #[test]
+    fn models_without_tool_support_get_text_mode() {
+        assert_eq!(ToolMode::choose(false, false, false), ToolMode { enabled: true, native: false });
+        assert_eq!(ToolMode::choose(false, false, true), ToolMode { enabled: true, native: false });
+        assert_eq!(ToolMode::choose(false, true, true), ToolMode { enabled: true, native: false });
+    }
+
+    #[test]
+    fn a_vision_only_model_describing_an_image_gets_no_tools() {
+        assert!(!ToolMode::choose(false, true, false).enabled);
+    }
 }

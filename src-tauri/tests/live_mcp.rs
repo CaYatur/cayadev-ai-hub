@@ -279,3 +279,53 @@ async fn agent_calls_an_mcp_tool_natively() {
 async fn agent_calls_an_mcp_tool_in_text_mode() {
     agent_run(false).await;
 }
+
+/// Built-in tools alone, in text mode: what a model without native tool
+/// support now gets even with no MCP server attached.
+#[tokio::test]
+#[ignore]
+async fn agent_uses_a_builtin_tool_in_text_mode() {
+    let model = std::env::var("MCP_TEST_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into());
+    let workspace = scratch("builtin");
+    std::fs::write(workspace.join("secret.txt"), "The code word is PELICAN-902.").unwrap();
+    let mut tools = WorkspaceTools::without_checkpoints(&workspace);
+    let runner = AgentRunner::new(
+        OllamaClient::new(DEFAULT_HOST, Timeouts::default()),
+        PermissionEngine::new(&workspace, PermissionMode::Balanced),
+        RunConfig {
+            model: model.clone(),
+            num_ctx: Some(8192),
+            think: Some(false),
+            params_billions: Some(4.0),
+            max_steps: 6,
+            native_tools: false,
+            ..Default::default()
+        },
+    );
+    let (tx, mut rx) = mpsc::channel(512);
+    let collector = tokio::spawn(async move {
+        let mut calls = Vec::new();
+        let mut text = String::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::ToolProposed { call } => {
+                    println!("-> {} {:?} via {:?}", call.name, call.arguments, call.recovery);
+                    calls.push(call.name);
+                }
+                AgentEvent::ToolSettled { output, .. } => println!("<- {output}"),
+                AgentEvent::Token { text: t } => text.push_str(&t),
+                _ => {}
+            }
+        }
+        (calls, text)
+    });
+    let reason = runner
+        .run("Read secret.txt and tell me the code word.", &mut tools, &Approve, tx)
+        .await;
+    let (calls, text) = collector.await.unwrap();
+    println!("model {model}, text mode, built-in only: {reason:?}\nfinal text: {text}");
+    std::fs::remove_dir_all(&workspace).ok();
+    assert_eq!(reason, StopReason::Completed);
+    assert!(calls.iter().any(|c| c == "read_file"), "{calls:?}");
+    assert!(text.contains("PELICAN-902"), "{text}");
+}

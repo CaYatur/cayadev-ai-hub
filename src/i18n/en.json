@@ -192,7 +192,7 @@
     "timeout": "Tool call timeout (seconds)",
     "autoApprove": "Run tools without asking",
     "enabled": "Agent can use this server",
-    "transportHint": "npx and other .cmd launchers work as commands. Remote servers must speak Streamable HTTP; the older HTTP+SSE transport is not supported.",
+    "transportHint": "Two transports are supported: stdio (a local command; npx and other .cmd launchers work) and Streamable HTTP. The older HTTP+SSE transport is not supported.",
     "test": "Test connection",
     "testing": "Testing…",
     "testOk": "Connected. {{count}} tools found.",

@@ -192,7 +192,7 @@
     "timeout": "Araç çağrısı zaman aşımı (saniye)",
     "autoApprove": "Araçları sormadan çalıştır",
     "enabled": "Ajan bu sunucuyu kullanabilir",
-    "transportHint": "npx ve diğer .cmd başlatıcılar komut olarak çalışır. Uzak sunucular Streamable HTTP konuşmalı; eski HTTP+SSE desteklenmiyor.",
+    "transportHint": "İki bağlantı türü desteklenir: stdio (yerel komut; npx ve diğer .cmd başlatıcılar çalışır) ve Streamable HTTP. Eski HTTP+SSE desteklenmiyor.",
     "test": "Bağlantıyı test et",
     "testing": "Test ediliyor…",
     "testOk": "Bağlandı. {{count}} araç bulundu.",
