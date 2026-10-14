@@ -1,3 +1,36 @@
+# v0.2.7 — MCP results no longer flood the model
+
+An MCP tool can return far more than a model can usefully read. A music
+visualizer's "now playing" tool answered with the cover art inlined as a
+292 KB base64 data URI; a small local model received all of it, lost the
+question, and answered about something unrelated. Nothing in the app limited
+what an MCP result could put into the conversation.
+
+## Binary data becomes a short note
+
+Every MCP result and error is now cleaned before the model sees it, whatever
+server or tool it came from.
+
+- Data URIs and long base64 runs, in plain text or anywhere inside nested
+  JSON, are replaced with a note such as `[image omitted, image/png, 292 KB]`.
+  Hashes, short ids, prose and file paths are left as they are.
+- Image, audio and binary resource blocks become the same kind of note.
+
+## Size limits that follow the model
+
+- Arrays keep their first 25 items, objects their first 60 keys, strings
+  their first 2,000 characters, and nesting stops at depth 12; each cut says
+  how much was left out.
+- The whole result is capped relative to the model's context window, between
+  2,000 and 24,000 characters (about 5,900 for an 8K context).
+
+Built-in tools are unchanged, so file reads stay exact for edits.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled. MCP servers started through `npx` need Node.js.
+
 # v0.2.6 — the agent can use MCP tools
 
 Everything the agent could do was built into the app: files, commands, GitHub,
