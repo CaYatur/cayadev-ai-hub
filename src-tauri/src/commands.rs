@@ -52,6 +52,8 @@ pub struct AppState {
     /// watch it, so Stop takes effect immediately rather than at the end of
     /// the current step.
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// MCP servers the user configured, and their live connections.
+    pub mcp: Arc<crate::mcp::McpManager>,
 }
 
 impl AppState {
@@ -71,6 +73,7 @@ impl AppState {
             questions: Arc::new(Mutex::new(HashMap::new())),
             attachments: RwLock::new(Vec::new()),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp: Arc::new(crate::mcp::McpManager::new()),
         }
     }
 }
@@ -319,7 +322,21 @@ pub async fn run_agent(
     // `completion` and `vision` and nothing else — and Ollama refuses a request
     // that offers tools to one. Cloud models report no capabilities, so they
     // are given the benefit of the doubt.
-    let tools_enabled = profile.map(|p| p.capabilities.tools).unwrap_or(true);
+    let native_tools = profile.map(|p| p.capabilities.tools).unwrap_or(true);
+
+    // MCP tools the user attached to the agent. A server that fails to start
+    // is reported in the chat and the run goes on without it.
+    let (mcp_tools, mcp_errors) = state.mcp.tools_for_agent().await;
+    for message in mcp_errors {
+        let _ = app.emit("agent://event", &AgentEvent::Error { message });
+    }
+
+    // A model without native tool support used to get no tools at all. With
+    // MCP tools attached it gets them in text mode instead: described in the
+    // prompt, called with one strict JSON format the parser is tolerant of.
+    // Without MCP tools nothing changes, so a vision-only model answering
+    // about a screenshot behaves exactly as before.
+    let tools_enabled = native_tools || !mcp_tools.is_empty();
 
     let classifier = policy.get(TaskClass::Classify).map(str::to_string);
     let assisted = *state.assisted_approval.read().await;
@@ -336,7 +353,7 @@ pub async fn run_agent(
         .map(|p| p.name.clone())
         .or_else(|| policy.get(TaskClass::Vision).map(str::to_string));
 
-    let mut tools = WorkspaceTools::new(&workspace)
+    let workspace_tools = WorkspaceTools::new(&workspace)
         .with_asker(Arc::new(crate::session::UiAsker::new(
             app.clone(),
             state.questions.clone(),
@@ -346,6 +363,17 @@ pub async fn run_agent(
             eyes,
             tauri::Manager::path(&app).resource_dir().ok(),
         );
+    let auto_approve: Vec<String> = state
+        .mcp
+        .config()
+        .await
+        .servers
+        .iter()
+        .filter(|s| s.auto_approve)
+        .map(|s| s.id.clone())
+        .collect();
+    let mut tools =
+        crate::mcp::tools::WithMcp::new(workspace_tools, state.mcp.clone(), mcp_tools, auto_approve);
     let mut perms = PermissionEngine::new(&workspace, mode);
     for file in state.attachments.read().await.iter() {
         // The file itself, not its directory — dropping one file from Downloads
@@ -381,6 +409,7 @@ pub async fn run_agent(
             history: history.unwrap_or_default(),
             images,
             tools_enabled,
+            native_tools,
             ..Default::default()
         },
     )
@@ -431,6 +460,48 @@ pub async fn run_agent(
     }
 
     Ok(format!("{reason:?}"))
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn mcp_get_config(state: State<'_, AppState>) -> Result<crate::mcp::McpConfig, String> {
+    Ok(state.mcp.config().await)
+}
+
+/// Save the whole server list. Returns it normalised (ids filled in).
+#[tauri::command]
+pub async fn mcp_save_config(
+    state: State<'_, AppState>,
+    config: crate::mcp::McpConfig,
+) -> Result<crate::mcp::McpConfig, String> {
+    state.mcp.save(config).await
+}
+
+/// Connect to a server once and list its tools, saved or not.
+#[tauri::command]
+pub async fn mcp_test_server(
+    state: State<'_, AppState>,
+    server: crate::mcp::ServerConfig,
+) -> Result<Vec<crate::mcp::McpTool>, String> {
+    state.mcp.test(server).await
+}
+
+#[tauri::command]
+pub async fn mcp_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::mcp::client::ServerStatus>, String> {
+    Ok(state.mcp.status().await)
+}
+
+/// Tools of every enabled server, connecting where needed, with errors.
+#[tauri::command]
+pub async fn mcp_list_tools(
+    state: State<'_, AppState>,
+) -> Result<(Vec<crate::mcp::McpTool>, Vec<String>), String> {
+    Ok(state.mcp.tools_for_agent().await)
 }
 
 /// How much the agent should spend on a task.

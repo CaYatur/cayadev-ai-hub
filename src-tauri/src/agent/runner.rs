@@ -28,7 +28,7 @@ use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
 use super::context;
-use super::prompt::{compact_tools, select_tools, system_prompt, PromptTier};
+use super::prompt::{compact_tools, select_tools, system_prompt, text_tool_instructions, PromptTier};
 use super::toolcall::{extract, unknown_tool_name, Recovery};
 
 /// Executes tool calls. Implemented by the real tool surface and by test doubles.
@@ -159,6 +159,12 @@ pub struct RunConfig {
     /// Several vision models cannot call them, and Ollama refuses a request
     /// that offers tools to a model without the capability.
     pub tools_enabled: bool,
+    /// Whether the model calls tools through the API.
+    ///
+    /// `false` describes the tools in the system prompt instead, with one
+    /// strict JSON format, and feeds results back as plain user messages: a
+    /// model without tool support has no template for either.
+    pub native_tools: bool,
 }
 
 impl Default for RunConfig {
@@ -176,6 +182,7 @@ impl Default for RunConfig {
             history: Vec::new(),
             images: Vec::new(),
             tools_enabled: true,
+            native_tools: true,
         }
     }
 }
@@ -238,7 +245,21 @@ impl AgentRunner {
         tools.set_progress(progress_tx);
 
         let workspace = self.perms.workspace().display().to_string();
-        let mut messages = vec![Message::system(system_prompt(tier, &workspace, &schemas))];
+        let mut system = system_prompt(tier, &workspace, &schemas);
+        let native = self.config.native_tools;
+        if !native && !schemas.is_empty() {
+            system.push_str(&text_tool_instructions(&schemas));
+        }
+        let mut messages = vec![Message::system(system)];
+        // How a tool result goes back. Natively it is a `tool` message; in
+        // text mode the template would drop that role, so it is a user turn.
+        let result_message = |name: &str, output: &str| {
+            if native {
+                Message::tool_result(name, output)
+            } else {
+                Message::user(&format!("Result of {name}:\n{output}"))
+            }
+        };
         messages.extend(self.config.history.iter().map(Turn::to_message));
         let mut instruction = Message::user(user_message);
         if !self.config.images.is_empty() {
@@ -279,7 +300,7 @@ impl AgentRunner {
                 stream: true,
                 // An empty list is not the same as no list: Ollama rejects a
                 // request that offers tools to a model without the capability.
-                tools: (!schemas.is_empty()).then(|| schemas.clone()),
+                tools: (native && !schemas.is_empty()).then(|| schemas.clone()),
                 think: self.config.think,
                 format: None,
                 options: Some(Options {
@@ -424,11 +445,16 @@ impl AgentRunner {
 
             // Record what the model said with the call syntax stripped out, so
             // the transcript does not carry raw JSON as if it were prose.
-            messages.push(Message {
-                role: "assistant".into(),
-                content: found.residual_text.clone(),
-                tool_calls: Some(found.calls.clone()),
-                ..Default::default()
+            messages.push(if native {
+                Message {
+                    role: "assistant".into(),
+                    content: found.residual_text.clone(),
+                    tool_calls: Some(found.calls.clone()),
+                    ..Default::default()
+                }
+            } else {
+                // The call is only in the text, so the text is the record.
+                Message::assistant(&assistant.content)
             });
 
             for call in &found.calls {
@@ -437,15 +463,22 @@ impl AgentRunner {
                     return StopReason::Cancelled;
                 }
                 let name = call.function.name.clone();
-                let args = call.function.arguments_object();
+                let mut args = call.function.arguments_object();
 
-                // --- Guard 1: required arguments ----------------------------
-                if let Some(missing) = missing_required(&schemas, &name, &args) {
-                    let msg = format!(
-                        "Error: `{name}` requires the argument `{missing}`, which was not \
-                         provided. Call it again with `{missing}` set."
-                    );
-                    messages.push(Message::tool_result(&name, &msg));
+                // --- Guard 1: arguments against the schema ------------------
+                // Required arguments first, with the message small models have
+                // been measured against; then types, enums and unknown keys,
+                // repairing harmless slips (`"5"` for 5) in place.
+                let invalid = missing_required(&schemas, &name, &args)
+                    .map(|missing| {
+                        format!(
+                            "Error: `{name}` requires the argument `{missing}`, which was not \
+                             provided. Call it again with `{missing}` set."
+                        )
+                    })
+                    .or_else(|| invalid_arguments(&schemas, &name, &mut args));
+                if let Some(msg) = invalid {
+                    messages.push(result_message(&name, &msg));
                     let _ = events
                         .send(AgentEvent::ToolSettled {
                             id: String::new(),
@@ -465,7 +498,7 @@ impl AgentRunner {
                          nothing has changed in between. The result will not change either. \
                          Use the result you already have, or answer without calling a tool."
                     );
-                    messages.push(Message::tool_result(&name, &msg));
+                    messages.push(result_message(&name, &msg));
                     let _ = events
                         .send(AgentEvent::Done { reason: StopReason::LoopDetected })
                         .await;
@@ -546,7 +579,7 @@ impl AgentRunner {
                     Outcome::Failed => "The tool failed to run.".into(),
                 };
 
-                messages.push(Message::tool_result(&name, &output));
+                messages.push(result_message(&name, &output));
                 let _ = events
                     .send(AgentEvent::ToolSettled {
                         id: proposed.id,
@@ -635,6 +668,21 @@ fn missing_required(schemas: &[Tool], name: &str, args: &Map<String, Value>) -> 
             _ => false,
         })
         .map(str::to_string)
+}
+
+/// Schema problems beyond a missing argument, as a message for the model.
+///
+/// Repairs `args` in place when the slip is harmless.
+fn invalid_arguments(schemas: &[Tool], name: &str, args: &mut Map<String, Value>) -> Option<String> {
+    let tool = schemas.iter().find(|t| t.function.name == name)?;
+    let schema = &tool.function.parameters;
+    crate::mcp::schema::validate(schema, args).err().map(|e| {
+        format!(
+            "Error: invalid arguments for `{name}`: {e}. Call it again with corrected \
+             arguments. Expected: {name}({}).",
+            crate::mcp::schema::signature(schema)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -759,5 +807,26 @@ mod tests {
     fn unknown_tool_reports_no_missing_argument() {
         // Name resolution already rejected it; this must not panic.
         assert_eq!(missing_required(&schema(), "nope", &Map::new()), None);
+    }
+
+    #[test]
+    fn a_wrong_type_is_reported_with_the_expected_signature() {
+        let schemas = vec![Tool::function(
+            "mcp__x__count",
+            "Count.",
+            json!({"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}),
+        )];
+        let mut bad = args(json!({"n": "many"}));
+        let msg = invalid_arguments(&schemas, "mcp__x__count", &mut bad).expect("should fail");
+        assert!(msg.contains("`n` must be integer") && msg.contains("mcp__x__count(n: integer*)"), "{msg}");
+
+        let mut slip = args(json!({"n": "7"}));
+        assert_eq!(invalid_arguments(&schemas, "mcp__x__count", &mut slip), None);
+        assert_eq!(slip["n"], json!(7), "a harmless slip is repaired in place");
+    }
+
+    #[test]
+    fn native_tools_are_the_default() {
+        assert!(RunConfig::default().native_tools);
     }
 }

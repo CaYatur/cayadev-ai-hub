@@ -11,7 +11,8 @@
     "today": "Today",
     "yesterday": "Yesterday",
     "earlier": "Earlier",
-    "activity": "Activity"
+    "activity": "Activity",
+    "mcp": "MCP"
   },
   "chat": {
     "chooseFolder": "choose folder",
@@ -166,5 +167,49 @@
     "orWrite": "Or write your own answer…",
     "writePlaceholder": "Your answer…",
     "skippedNotice": "Question skipped."
+  },
+  "mcpView": {
+    "title": "MCP servers",
+    "intro": "Connect Model Context Protocol servers and choose which of their tools the agent may use. Servers start when the agent first needs them.",
+    "add": "Add server",
+    "preset": {
+      "everything": "+ Everything (demo)",
+      "filesystem": "+ Filesystem"
+    },
+    "newServer": "New server",
+    "editServer": "Edit server",
+    "name": "Name",
+    "transport": "Transport",
+    "stdio": "Local process (stdio)",
+    "http": "Remote (Streamable HTTP)",
+    "command": "Command",
+    "args": "Arguments",
+    "env": "Environment (KEY=value per line)",
+    "cwd": "Working directory (optional)",
+    "url": "URL",
+    "bearer": "Bearer token (optional)",
+    "headers": "Headers (Name: value per line)",
+    "timeout": "Tool call timeout (seconds)",
+    "autoApprove": "Run tools without asking",
+    "enabled": "Agent can use this server",
+    "transportHint": "npx and other .cmd launchers work as commands. Remote servers must speak Streamable HTTP; the older HTTP+SSE transport is not supported.",
+    "test": "Test connection",
+    "testing": "Testing…",
+    "testOk": "Connected. {{count}} tools found.",
+    "testFailed": "Connection failed: {{error}}",
+    "save": "Save",
+    "saved": "Saved.",
+    "cancel": "Cancel",
+    "edit": "Edit",
+    "delete": "Delete",
+    "confirmDelete": "Remove the server “{{name}}”?",
+    "empty": "No MCP servers yet. Add one, or start from a preset.",
+    "connected": "connected · {{count}} tools",
+    "failed": "error",
+    "idle": "not started",
+    "noTools": "The server offers no tools.",
+    "toolsFound": "{{count}} tools",
+    "toolsForAgent": "Tools the agent can use",
+    "readOnly": "read-only"
   }
 }
