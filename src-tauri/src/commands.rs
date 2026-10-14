@@ -52,6 +52,8 @@ pub struct AppState {
     /// watch it, so Stop takes effect immediately rather than at the end of
     /// the current step.
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// MCP servers the user configured, and their live connections.
+    pub mcp: Arc<crate::mcp::McpManager>,
 }
 
 impl AppState {
@@ -71,6 +73,7 @@ impl AppState {
             questions: Arc::new(Mutex::new(HashMap::new())),
             attachments: RwLock::new(Vec::new()),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp: Arc::new(crate::mcp::McpManager::new()),
         }
     }
 }
@@ -319,7 +322,17 @@ pub async fn run_agent(
     // `completion` and `vision` and nothing else — and Ollama refuses a request
     // that offers tools to one. Cloud models report no capabilities, so they
     // are given the benefit of the doubt.
-    let tools_enabled = profile.map(|p| p.capabilities.tools).unwrap_or(true);
+    let native_tools = profile.map(|p| p.capabilities.tools).unwrap_or(true);
+
+    // MCP tools the user attached to the agent. A server that fails to start
+    // is reported in the chat and the run goes on without it.
+    let (mcp_tools, mcp_errors) = state.mcp.tools_for_agent().await;
+    for message in mcp_errors {
+        let _ = app.emit("agent://event", &AgentEvent::Error { message });
+    }
+
+    let ToolMode { enabled: tools_enabled, native: native_tools } =
+        ToolMode::choose(native_tools, !images.is_empty(), !mcp_tools.is_empty());
 
     let classifier = policy.get(TaskClass::Classify).map(str::to_string);
     let assisted = *state.assisted_approval.read().await;
@@ -336,7 +349,7 @@ pub async fn run_agent(
         .map(|p| p.name.clone())
         .or_else(|| policy.get(TaskClass::Vision).map(str::to_string));
 
-    let mut tools = WorkspaceTools::new(&workspace)
+    let workspace_tools = WorkspaceTools::new(&workspace)
         .with_asker(Arc::new(crate::session::UiAsker::new(
             app.clone(),
             state.questions.clone(),
@@ -346,6 +359,17 @@ pub async fn run_agent(
             eyes,
             tauri::Manager::path(&app).resource_dir().ok(),
         );
+    let auto_approve: Vec<String> = state
+        .mcp
+        .config()
+        .await
+        .servers
+        .iter()
+        .filter(|s| s.auto_approve)
+        .map(|s| s.id.clone())
+        .collect();
+    let mut tools =
+        crate::mcp::tools::WithMcp::new(workspace_tools, state.mcp.clone(), mcp_tools, auto_approve);
     let mut perms = PermissionEngine::new(&workspace, mode);
     for file in state.attachments.read().await.iter() {
         // The file itself, not its directory — dropping one file from Downloads
@@ -381,6 +405,7 @@ pub async fn run_agent(
             history: history.unwrap_or_default(),
             images,
             tools_enabled,
+            native_tools,
             ..Default::default()
         },
     )
@@ -431,6 +456,74 @@ pub async fn run_agent(
     }
 
     Ok(format!("{reason:?}"))
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn mcp_get_config(state: State<'_, AppState>) -> Result<crate::mcp::McpConfig, String> {
+    Ok(state.mcp.config().await)
+}
+
+/// Save the whole server list. Returns it normalised (ids filled in).
+#[tauri::command]
+pub async fn mcp_save_config(
+    state: State<'_, AppState>,
+    config: crate::mcp::McpConfig,
+) -> Result<crate::mcp::McpConfig, String> {
+    state.mcp.save(config).await
+}
+
+/// Connect to a server once and list its tools, saved or not.
+#[tauri::command]
+pub async fn mcp_test_server(
+    state: State<'_, AppState>,
+    server: crate::mcp::ServerConfig,
+) -> Result<Vec<crate::mcp::McpTool>, String> {
+    state.mcp.test(server).await
+}
+
+#[tauri::command]
+pub async fn mcp_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::mcp::client::ServerStatus>, String> {
+    Ok(state.mcp.status().await)
+}
+
+/// Tools of every enabled server, connecting where needed, with errors.
+#[tauri::command]
+pub async fn mcp_list_tools(
+    state: State<'_, AppState>,
+) -> Result<(Vec<crate::mcp::McpTool>, Vec<String>), String> {
+    Ok(state.mcp.tools_for_agent().await)
+}
+
+/// How tools are offered to the model for one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolMode {
+    /// Whether any tools are offered.
+    pub enabled: bool,
+    /// Through the API (`true`) or described in the prompt as JSON (`false`).
+    pub native: bool,
+}
+
+impl ToolMode {
+    /// A model with native tool support is unaffected. One without it used
+    /// to get no tools at all; it now gets them in text mode — described in
+    /// the prompt, called with one strict JSON format the parser tolerates —
+    /// and Ollama never sees a `tools` field it would refuse.
+    ///
+    /// One exception: a vision-only model handed an image, with no MCP tools
+    /// attached, still gets none. That run is "describe this picture", and a
+    /// tool list in the prompt only invites a 7B to call `read_file` on it.
+    pub fn choose(model_has_tools: bool, has_images: bool, has_mcp_tools: bool) -> Self {
+        if model_has_tools {
+            return Self { enabled: true, native: true };
+        }
+        Self { enabled: !has_images || has_mcp_tools, native: false }
+    }
 }
 
 /// How much the agent should spend on a task.
@@ -774,4 +867,31 @@ pub async fn attach_bytes(
         path: target.display().to_string(),
         source: "clipboard".into(),
     })
+}
+
+
+#[cfg(test)]
+mod tool_mode_tests {
+    use super::ToolMode;
+
+    #[test]
+    fn native_models_are_unaffected() {
+        for images in [false, true] {
+            for mcp in [false, true] {
+                assert_eq!(ToolMode::choose(true, images, mcp), ToolMode { enabled: true, native: true });
+            }
+        }
+    }
+
+    #[test]
+    fn models_without_tool_support_get_text_mode() {
+        assert_eq!(ToolMode::choose(false, false, false), ToolMode { enabled: true, native: false });
+        assert_eq!(ToolMode::choose(false, false, true), ToolMode { enabled: true, native: false });
+        assert_eq!(ToolMode::choose(false, true, true), ToolMode { enabled: true, native: false });
+    }
+
+    #[test]
+    fn a_vision_only_model_describing_an_image_gets_no_tools() {
+        assert!(!ToolMode::choose(false, true, false).enabled);
+    }
 }

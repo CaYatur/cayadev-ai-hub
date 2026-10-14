@@ -11,7 +11,8 @@
     "today": "Bugün",
     "yesterday": "Dün",
     "earlier": "Daha önce",
-    "activity": "Etkinlik"
+    "activity": "Etkinlik",
+    "mcp": "MCP"
   },
   "chat": {
     "chooseFolder": "klasör seç",
@@ -166,5 +167,49 @@
     "orWrite": "Ya da kendi yanıtını yaz…",
     "writePlaceholder": "Yanıtın…",
     "skippedNotice": "Soru atlandı."
+  },
+  "mcpView": {
+    "title": "MCP sunucuları",
+    "intro": "Model Context Protocol sunucularını bağla ve ajanın hangi araçlarını kullanabileceğini seç. Sunucular ajan onlara ilk ihtiyaç duyduğunda başlar.",
+    "add": "Sunucu ekle",
+    "preset": {
+      "everything": "+ Everything (deneme)",
+      "filesystem": "+ Dosya sistemi"
+    },
+    "newServer": "Yeni sunucu",
+    "editServer": "Sunucuyu düzenle",
+    "name": "Ad",
+    "transport": "Bağlantı türü",
+    "stdio": "Yerel işlem (stdio)",
+    "http": "Uzak (Streamable HTTP)",
+    "command": "Komut",
+    "args": "Argümanlar",
+    "env": "Ortam değişkenleri (her satıra ANAHTAR=değer)",
+    "cwd": "Çalışma klasörü (isteğe bağlı)",
+    "url": "URL",
+    "bearer": "Bearer token (isteğe bağlı)",
+    "headers": "Başlıklar (her satıra Ad: değer)",
+    "timeout": "Araç çağrısı zaman aşımı (saniye)",
+    "autoApprove": "Araçları sormadan çalıştır",
+    "enabled": "Ajan bu sunucuyu kullanabilir",
+    "transportHint": "İki bağlantı türü desteklenir: stdio (yerel komut; npx ve diğer .cmd başlatıcılar çalışır) ve Streamable HTTP. Eski HTTP+SSE desteklenmiyor.",
+    "test": "Bağlantıyı test et",
+    "testing": "Test ediliyor…",
+    "testOk": "Bağlandı. {{count}} araç bulundu.",
+    "testFailed": "Bağlantı kurulamadı: {{error}}",
+    "save": "Kaydet",
+    "saved": "Kaydedildi.",
+    "cancel": "Vazgeç",
+    "edit": "Düzenle",
+    "delete": "Sil",
+    "confirmDelete": "“{{name}}” sunucusu kaldırılsın mı?",
+    "empty": "Henüz MCP sunucusu yok. Bir tane ekle ya da hazır bir örnekle başla.",
+    "connected": "bağlı · {{count}} araç",
+    "failed": "hata",
+    "idle": "başlatılmadı",
+    "noTools": "Sunucu hiç araç sunmuyor.",
+    "toolsFound": "{{count}} araç",
+    "toolsForAgent": "Ajanın kullanabileceği araçlar",
+    "readOnly": "salt okunur"
   }
 }

@@ -76,6 +76,24 @@ impl PromptTier {
             Self::Full => usize::MAX,
         }
     }
+
+    /// Extra room for MCP tools, on top of [`Self::tool_budget`].
+    ///
+    /// The user attached these on purpose, so they are not left to compete
+    /// with the built-in surface for the same slots; but a weak model still
+    /// cannot choose between forty of them, so they are capped too. Not
+    /// measured: a judgement in line with the budgets above.
+    pub fn mcp_budget(&self) -> usize {
+        match self {
+            Self::Minimal => 4,
+            Self::Compact => 10,
+            Self::Full => 40,
+        }
+    }
+}
+
+fn is_mcp(tool: &Tool) -> bool {
+    tool.function.name.starts_with(crate::mcp::TOOL_PREFIX)
 }
 
 /// Tools every tier keeps.
@@ -129,8 +147,9 @@ const PRIORITY_TOOLS: &[&str] = &[
 /// it by mistake — and a tool the model never needed still costs prefill on
 /// every single step.
 pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
-    let budget = tier.tool_budget();
-    if tools.len() <= budget {
+    let mcp_reserved = tools.iter().filter(|t| is_mcp(t)).count().min(tier.mcp_budget());
+    let budget = tier.tool_budget().saturating_add(mcp_reserved);
+    if tools.len() <= budget && tools.iter().filter(|t| is_mcp(t)).count() <= tier.mcp_budget() {
         return tools.to_vec();
     }
 
@@ -146,12 +165,21 @@ pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
     for name in CORE_TOOLS {
         take(name, &mut chosen);
     }
+    // MCP tools next, in server order, up to their own reservation.
+    for tool in tools.iter().filter(|t| is_mcp(t)).take(mcp_reserved) {
+        take(&tool.function.name, &mut chosen);
+    }
     for name in PRIORITY_TOOLS {
         take(name, &mut chosen);
     }
     for tool in tools {
         if chosen.len() >= budget {
             break;
+        }
+        // MCP tools past the reservation stay out, so they cannot crowd out
+        // the built-in surface either.
+        if is_mcp(tool) {
+            continue;
         }
         if !chosen.iter().any(|c| c.function.name == tool.function.name) {
             chosen.push(tool.clone());
@@ -241,6 +269,33 @@ pub fn system_prompt(tier: PromptTier, workspace: &str, tools: &[Tool]) -> Strin
         out.push('\n');
     }
 
+    out
+}
+
+/// Tool instructions for a model that cannot call tools natively.
+///
+/// Appended to the system prompt instead of sending schemas out of band. One
+/// strict format, stated once with an example, because a weak model copies
+/// examples far better than it follows descriptions. The parser accepts much
+/// more than this (fences, tags, trailing prose), so a near miss still works.
+pub fn text_tool_instructions(tools: &[Tool]) -> String {
+    let mut out = String::from(
+        "\nTo use a tool, reply with ONLY this JSON object and nothing else:\n\
+         {\"name\": \"<tool name>\", \"arguments\": {<arguments>}}\n\
+         Then wait for the result. When you can answer, reply in plain text with no JSON.\n\
+         Arguments marked * are required.\nTools:\n",
+    );
+    for t in tools {
+        let sig = crate::mcp::schema::signature(&t.function.parameters);
+        let desc = truncate_on_boundary(&t.function.description, 100);
+        out.push_str(&format!("- {}({sig}): {desc}\n", t.function.name));
+    }
+    if let Some(first) = tools.first() {
+        out.push_str(&format!(
+            "Example: {{\"name\": \"{}\", \"arguments\": {{}}}}\n",
+            first.function.name
+        ));
+    }
     out
 }
 
@@ -462,5 +517,39 @@ mod tests {
         let s = truncate_on_boundary("the quick brown fox jumps", 12);
         assert!(!s.ends_with("bro"));
         assert_eq!(s, "the quick");
+    }
+
+    fn mcp_named(name: &str) -> Tool {
+        Tool::function(name, "A tool.", json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}))
+    }
+
+    #[test]
+    fn mcp_tools_get_their_own_room_and_are_capped() {
+        let mut all: Vec<Tool> = CORE_TOOLS.iter().map(|n| mcp_named(n)).collect();
+        all.extend((0..30).map(|i| mcp_named(&format!("gh_tool_{i}"))));
+        all.extend((0..20).map(|i| mcp_named(&format!("mcp__srv__t{i}"))));
+
+        for tier in [PromptTier::Minimal, PromptTier::Compact] {
+            let chosen = select_tools(&all, tier);
+            let mcp = chosen.iter().filter(|t| t.function.name.starts_with("mcp__")).count();
+            assert_eq!(mcp, tier.mcp_budget(), "{tier:?}");
+            assert_eq!(chosen.len(), tier.tool_budget() + tier.mcp_budget(), "{tier:?}");
+            for core in CORE_TOOLS {
+                assert!(chosen.iter().any(|t| t.function.name == *core), "{tier:?} dropped {core}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_surface_without_mcp_tools_is_trimmed_as_before() {
+        let all: Vec<Tool> = (0..30).map(|i| mcp_named(&format!("tool_{i}"))).collect();
+        assert_eq!(select_tools(&all, PromptTier::Compact).len(), PromptTier::Compact.tool_budget());
+    }
+
+    #[test]
+    fn text_mode_instructions_show_the_format_and_signatures() {
+        let text = text_tool_instructions(&[mcp_named("mcp__srv__find")]);
+        assert!(text.contains("{\"name\": \"<tool name>\", \"arguments\""), "{text}");
+        assert!(text.contains("- mcp__srv__find(q: string*)"), "{text}");
     }
 }

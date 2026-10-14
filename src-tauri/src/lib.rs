@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod checkpoint;
+pub mod mcp;
 pub mod commands;
 pub mod ollama;
 pub mod perms;
@@ -25,6 +26,17 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(commands::AppState::new())
+        .setup(|app| {
+            // MCP servers live in the app's config directory, next to the
+            // store the frontend uses.
+            use tauri::Manager;
+            if let Ok(dir) = app.path().app_config_dir() {
+                let state = app.state::<commands::AppState>();
+                let mcp = state.mcp.clone();
+                tauri::async_runtime::block_on(mcp.load_from(dir.join("mcp.json")));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::ollama_version,
             commands::list_models,
@@ -45,7 +57,20 @@ pub fn run() {
             commands::attach_files,
             commands::attach_bytes,
             commands::clear_attachments,
+            commands::mcp_get_config,
+            commands::mcp_save_config,
+            commands::mcp_test_server,
+            commands::mcp_status,
+            commands::mcp_list_tools,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // No MCP server process may outlive the app.
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                let mcp = app.state::<commands::AppState>().mcp.clone();
+                tauri::async_runtime::block_on(mcp.shutdown_all());
+            }
+        });
 }

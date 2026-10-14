@@ -142,6 +142,10 @@ pub enum Action {
     /// mode that refuses it would leave the agent guessing instead of asking,
     /// which is the behaviour it exists to prevent.
     AskUser,
+    /// Calling a tool on a user-configured MCP server. What it does is up to
+    /// the server, so the engine only knows what the server claims
+    /// (`read_only`) and what the user decided (`trusted`, i.e. auto-approve).
+    McpCall { server: String, tool: String, read_only: bool, trusted: bool },
 }
 
 impl Action {
@@ -161,6 +165,8 @@ impl Action {
             | Self::DeleteFile { .. }
             | Self::RunCommand { .. }
             | Self::Publish { .. } => true,
+            // Unknown effects count as changes unless the server says otherwise.
+            Self::McpCall { read_only, .. } => !read_only,
             Self::ReadFile { .. }
             | Self::ListDir { .. }
             | Self::Network { .. }
@@ -224,6 +230,23 @@ impl PermissionEngine {
                     true,
                 ),
             },
+            Action::McpCall { server, tool, read_only, trusted } => {
+                let what = format!("`{tool}` on MCP server `{server}`");
+                match self.mode {
+                    _ if *trusted => Evaluation::allow(format!("{what}: server is set to auto-approve.")),
+                    PermissionMode::Autonomous | PermissionMode::Unrestricted => {
+                        Evaluation::allow(format!("{what}: allowed in this mode."))
+                    }
+                    PermissionMode::ProjectAuto | PermissionMode::Balanced if *read_only => {
+                        Evaluation::allow(format!("{what}: the server marks it read-only."))
+                    }
+                    _ => Evaluation::ask(
+                        format!("Run {what}."),
+                        if *read_only { CommandRisk::ReadOnly } else { CommandRisk::Mutating },
+                        false,
+                    ),
+                }
+            }
             Action::Publish { summary } => Evaluation::ask(
                 format!("{summary}. This is visible to other people."),
                 CommandRisk::Mutating,
@@ -655,5 +678,20 @@ mod tests {
         let e = engine(PermissionMode::ProjectAuto)
             .evaluate(&Action::Network { url: "https://example.com".into() });
         assert_eq!(e.decision, Decision::Ask);
+    }
+
+    fn mcp(read_only: bool, trusted: bool) -> Action {
+        Action::McpCall { server: "files".into(), tool: "read".into(), read_only, trusted }
+    }
+
+    #[test]
+    fn mcp_calls_ask_unless_read_only_trusted_or_autonomous() {
+        assert_eq!(engine(PermissionMode::Balanced).evaluate(&mcp(false, false)).decision, Decision::Ask);
+        assert_eq!(engine(PermissionMode::Balanced).evaluate(&mcp(true, false)).decision, Decision::Allow);
+        assert_eq!(engine(PermissionMode::ReadOnly).evaluate(&mcp(true, false)).decision, Decision::Ask);
+        assert_eq!(engine(PermissionMode::ReadOnly).evaluate(&mcp(false, true)).decision, Decision::Allow);
+        assert_eq!(engine(PermissionMode::Autonomous).evaluate(&mcp(false, false)).decision, Decision::Allow);
+        assert!(mcp(false, false).changes_something());
+        assert!(!mcp(true, false).changes_something());
     }
 }

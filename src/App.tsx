@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Activity from "./components/Activity";
 import Chat from "./components/Chat";
+import Mcp from "./components/Mcp";
 import Models from "./components/Models";
 import Sidebar from "./components/Sidebar";
 import {
@@ -29,7 +30,7 @@ import {
 } from "./lib/sessions";
 import "./styles/app.css";
 
-type View = "chat" | "models" | "activity";
+type View = "chat" | "models" | "activity" | "mcp";
 
 export default function App() {
   const { t } = useTranslation();
@@ -567,6 +568,12 @@ export default function App() {
           >
             {t("app.activity")}
           </button>
+          <button
+            className={view === "mcp" ? "viewtab viewtab-on" : "viewtab"}
+            onClick={() => setView("mcp")}
+          >
+            {t("app.mcp")}
+          </button>
         </div>
 
         {view === "chat" && active ? (
@@ -608,6 +615,10 @@ export default function App() {
             onCopy={copy}
             onBranch={branch}
           />
+        ) : view === "mcp" ? (
+          <main className="content">
+            <Mcp />
+          </main>
         ) : view === "activity" && active ? (
           <main className="content">
             <Activity

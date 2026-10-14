@@ -114,6 +114,21 @@ constant yes/no decisions go to a 0.5B that answers in 200 ms.
   a web link in the browser, a file path in its application
 - Turkish and English interface, Turkish by default
 
+**MCP**
+- Connect Model Context Protocol servers from the MCP page and choose, per
+  server and per tool, what the agent may use
+- Two transports: local processes over **stdio** (`npx`, `uvx`, any command,
+  with arguments, environment and working directory) and remote servers over
+  **Streamable HTTP** (URL, headers, bearer token). The older HTTP+SSE
+  transport is not supported
+- Test connection lists a server's tools before you save it
+- Arguments are checked against each tool's schema; harmless slips are
+  repaired and anything else goes back to the model as an error it can fix
+- Read-only tools run without asking in Project auto and Balanced; others ask
+  unless the server is set to auto-approve
+- Models without native tool calling get every tool through a strict JSON
+  format in the prompt instead of no tools at all
+
 ## Screens
 
 | | |
