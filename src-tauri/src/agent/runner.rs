@@ -270,6 +270,15 @@ impl AgentRunner {
         // of it, so the index moves and has to be carried rather than assumed.
         let mut task = messages.len() - 1;
 
+        // Native tool schemas ride beside the messages and use the same window.
+        let reserved: usize = if native {
+            schemas
+                .iter()
+                .map(|t| crate::agent::prompt::estimate_tokens(&serde_json::to_string(t).unwrap_or_default()))
+                .sum()
+        } else {
+            0
+        };
         let mut repeats = Repetition::default();
         // Retries count consecutively, not per run. Two stalls in a row is a
         // real failure; a stall at step five and another at step seventy are
@@ -287,7 +296,7 @@ impl AgentRunner {
             // from the front, which is where the system prompt and the task
             // are — and then its template reports "no user query found".
             if let Some(num_ctx) = self.config.num_ctx {
-                let trim = context::fit(&mut messages, num_ctx, task);
+                let trim = context::fit(&mut messages, num_ctx, task, reserved);
                 task = trim.task;
                 if trim.dropped > 0 {
                     tracing::info!("dropped {} messages to fit {num_ctx} tokens", trim.dropped);
@@ -361,7 +370,7 @@ impl AgentRunner {
                         .is_some_and(|ctx| context::total_tokens(&messages) > (ctx / 2) as usize);
                     let message = if long {
                         if let Some(num_ctx) = self.config.num_ctx {
-                            task = context::fit(&mut messages, num_ctx / 2, task).task;
+                            task = context::fit(&mut messages, num_ctx / 2, task, reserved).task;
                         }
                         "The model stopped producing output. Shortening the conversation \
                          and trying once more."

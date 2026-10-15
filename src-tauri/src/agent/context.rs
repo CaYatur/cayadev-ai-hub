@@ -85,13 +85,15 @@ pub struct Trim {
 /// `task` is the index of the message holding the current instruction. It
 /// survives regardless of how old it gets — without that, a long run drops the
 /// thing it is trying to do and the model starts improvising.
-pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize) -> Trim {
-    let ceiling = (num_ctx as f64 * OCCUPANCY) as usize;
+pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize, reserved: usize) -> Trim {
+    // `reserved` is what the request carries outside the messages (native
+    // tool schemas). It fills the same window, so it comes off the top.
+    let ceiling = ((num_ctx as f64 * OCCUPANCY) as usize).saturating_sub(reserved);
     let mut task = task.min(messages.len().saturating_sub(1));
     if total_tokens(messages) <= ceiling {
         return Trim { dropped: 0, task };
     }
-    let budget = (num_ctx as f64 * TARGET) as usize;
+    let budget = ((num_ctx as f64 * TARGET) as usize).saturating_sub(reserved);
 
     // The system prompt states how to behave; everything after it is
     // conversation and can go, except the instruction and the recent tail.
@@ -117,6 +119,11 @@ pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize) -> Trim {
         dropped += 1;
     }
 
+    // Dropping whole messages stops at the recent tail. When that tail is
+    // itself too big (a few long tool results on a small window), shorten
+    // the longest messages instead, so the request never overflows and the
+    // daemon never cuts the instruction off the front.
+    let shortened = shorten_long_messages(messages, ceiling, head, task);
     if dropped > 0 {
         // Say what was lost. A model that knows its history is partial asks or
         // re-reads; one that does not will confidently misremember.
@@ -130,13 +137,52 @@ pub fn fit(messages: &mut Vec<Message>, num_ctx: u32, task: usize) -> Trim {
             task += 1;
         }
     }
-    Trim { dropped, task }
+    Trim { dropped: dropped + shortened, task }
+}
+
+/// Smallest a shortened message gets, in tokens.
+const SHORT_FLOOR: usize = 120;
+
+/// Cut the longest messages (never the system prompt or the instruction)
+/// until the conversation fits `ceiling`. Returns how many were cut.
+fn shorten_long_messages(messages: &mut [Message], ceiling: usize, head: usize, task: usize) -> usize {
+    let mut cut = 0usize;
+    while total_tokens(messages) > ceiling {
+        let longest = (head..messages.len())
+            .filter(|&i| i != task)
+            .max_by_key(|&i| estimate_tokens(&messages[i].content));
+        let Some(i) = longest else { break };
+        let have = estimate_tokens(&messages[i].content);
+        if have <= SHORT_FLOOR {
+            break;
+        }
+        let over = total_tokens(messages) - ceiling;
+        let keep_tokens = have.saturating_sub(over).max(SHORT_FLOOR).min(have / 2 + 1);
+        let keep_chars = (keep_tokens as f64 * 3.6) as usize;
+        let text: String = messages[i].content.chars().take(keep_chars).collect();
+        let total = messages[i].content.chars().count();
+        messages[i].content = format!(
+            "{text}\n[shortened to fit the context window: {} of {total} characters left out]",
+            total - text.chars().count()
+        );
+        messages[i].thinking = None;
+        cut += 1;
+    }
+    cut
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_tail_too_big_to_drop_is_shortened_and_the_task_survives() {
+        let (mut messages, task) = with_history(0, 9_000, 3);
+        let trim = fit(&mut messages, 8192, task, 1_500);
+        assert!(trim.dropped > 0);
+        assert!(total_tokens(&messages) + 1_500 <= (8192.0 * OCCUPANCY) as usize);
+        assert_eq!(messages[trim.task].content, "Refactor the parser.");
+    }
     /// A run with no prior conversation: system, task, then steps.
     fn convo(steps: usize, filler: usize) -> Vec<Message> {
         let mut messages = vec![
@@ -171,7 +217,7 @@ mod tests {
     fn a_short_conversation_is_untouched() {
         let mut messages = convo(2, 100);
         let before = messages.len();
-        assert_eq!(fit(&mut messages, 8192, 1).dropped, 0);
+        assert_eq!(fit(&mut messages, 8192, 1, 0).dropped, 0);
         assert_eq!(messages.len(), before);
     }
 
@@ -179,7 +225,7 @@ mod tests {
     fn a_long_conversation_is_trimmed_to_fit() {
         let mut messages = convo(40, 2_000);
         assert!(total_tokens(&messages) > 8192);
-        let trim = fit(&mut messages, 8192, 1);
+        let trim = fit(&mut messages, 8192, 1, 0);
 
         assert!(trim.dropped > 0, "nothing was dropped");
         assert!(
@@ -195,14 +241,14 @@ mod tests {
         // step, and a conversation that changes behind the system prompt every
         // step is a KV cache thrown away every step.
         let mut messages = convo(40, 2_000);
-        let mut trim = fit(&mut messages, 8192, 1);
+        let mut trim = fit(&mut messages, 8192, 1, 0);
         assert!(trim.dropped > 0);
 
         // Several more steps of ordinary size must fit without another trim.
         for i in 0..3 {
             messages.push(Message::assistant(format!("later {i}")));
             messages.push(Message::tool_result("read_file", "z".repeat(1_000)));
-            trim = fit(&mut messages, 8192, trim.task);
+            trim = fit(&mut messages, 8192, trim.task, 0);
             assert_eq!(trim.dropped, 0, "trimmed again after only {i} more steps");
         }
     }
@@ -212,7 +258,7 @@ mod tests {
         // The failure this exists to prevent: Ollama truncating from the front,
         // leaving no user turn, and answering 500.
         let mut messages = convo(60, 3_000);
-        let trim = fit(&mut messages, 4096, 1);
+        let trim = fit(&mut messages, 4096, 1, 0);
 
         assert_eq!(messages[0].role, "system", "system prompt was dropped");
         assert!(messages[trim.task].content.contains("Refactor"));
@@ -227,7 +273,7 @@ mod tests {
         let (mut messages, task) = with_history(50, 1_500, 20);
         assert!(total_tokens(&messages) > 8192);
 
-        let trim = fit(&mut messages, 8192, task);
+        let trim = fit(&mut messages, 8192, task, 0);
 
         assert!(trim.dropped > 0);
         assert_eq!(messages[0].role, "system");
@@ -244,7 +290,7 @@ mod tests {
     #[test]
     fn old_turns_go_before_recent_ones() {
         let (mut messages, task) = with_history(30, 1_500, 4);
-        let trim = fit(&mut messages, 8192, task);
+        let trim = fit(&mut messages, 8192, task, 0);
         assert!(trim.dropped > 0);
         assert!(
             !messages.iter().any(|m| m.content.starts_with("older question 0")),
@@ -260,7 +306,7 @@ mod tests {
     fn the_most_recent_steps_survive() {
         let mut messages = convo(40, 2_000);
         let last = messages.last().cloned().unwrap();
-        fit(&mut messages, 8192, 1);
+        fit(&mut messages, 8192, 1, 0);
 
         assert_eq!(
             messages.last().unwrap().content,
@@ -273,7 +319,7 @@ mod tests {
     #[test]
     fn the_model_is_told_that_history_was_dropped() {
         let mut messages = convo(40, 2_000);
-        fit(&mut messages, 8192, 1);
+        fit(&mut messages, 8192, 1, 0);
         assert!(
             messages.iter().any(|m| m.content.contains("were dropped")),
             "trimming happened silently"
@@ -285,7 +331,7 @@ mod tests {
         // Better to send something slightly oversized than something the model
         // cannot act on at all.
         let (mut messages, task) = with_history(20, 4_000, 10);
-        let trim = fit(&mut messages, 512, task);
+        let trim = fit(&mut messages, 512, task, 0);
         assert_eq!(messages[0].role, "system");
         assert_eq!(messages[trim.task].content, "Refactor the parser.");
     }
@@ -293,9 +339,9 @@ mod tests {
     #[test]
     fn trimming_is_idempotent() {
         let mut messages = convo(40, 2_000);
-        let first = fit(&mut messages, 8192, 1);
+        let first = fit(&mut messages, 8192, 1, 0);
         let after_first = messages.len();
-        let second = fit(&mut messages, 8192, first.task);
+        let second = fit(&mut messages, 8192, first.task, 0);
         assert_eq!(second.dropped, 0);
         assert_eq!(messages.len(), after_first);
     }
@@ -305,7 +351,7 @@ mod tests {
         // Defensive: the caller tracks the index across appends and removals,
         // and a wrong one must degrade rather than crash a run.
         let mut messages = convo(40, 2_000);
-        let trim = fit(&mut messages, 8192, 9_999);
+        let trim = fit(&mut messages, 8192, 9_999, 0);
         assert!(trim.task < messages.len());
     }
 }
