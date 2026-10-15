@@ -268,8 +268,12 @@ impl AgentRunner {
         let mut messages = vec![Message::system(system)];
         // How a tool result goes back. Natively it is a `tool` message; in
         // text mode the template would drop that role, so it is a user turn.
+        // Whether this step uses native tool calling. Normally `native`, but a
+        // step that falls back to text mode after repeated server-side parse
+        // failures sends its results back as plain user turns too.
+        let step_native = AtomicBool::new(native);
         let result_message = |name: &str, output: &str| {
-            if native {
+            if step_native.load(Ordering::Relaxed) {
                 Message::tool_result(name, output)
             } else {
                 Message::user(&format!("Result of {name}:\n{output}"))
@@ -294,6 +298,9 @@ impl AgentRunner {
         // unrelated events, and an hour of finished work should not turn on
         // whether the first one happened.
         let mut stalled_in_a_row = 0usize;
+        // Consecutive steps where Ollama refused the model's own tool call as
+        // unparseable. Reset by any response that gets through.
+        let mut parse_failures_in_row = 0usize;
 
         for step in 0..self.config.max_steps {
             if self.cancelled() {
@@ -312,13 +319,25 @@ impl AgentRunner {
                 }
             }
 
+            let plan = parse_retry_plan(parse_failures_in_row);
+            let text_fallback = native && plan.text_fallback && !schemas.is_empty();
+            step_native.store(native && !text_fallback, Ordering::Relaxed);
+            let mut outgoing = messages.clone();
+            if text_fallback {
+                // No native schemas this step: describe the tools in text and
+                // let our lenient extractor parse whatever comes back.
+                outgoing.push(Message::user(&format!(
+                    "Native tool calling failed. For this step, call tools as text.{}",
+                    text_tool_instructions(&schemas)
+                )));
+            }
             let request = ChatRequest {
                 model: self.config.model.clone(),
-                messages: messages.clone(),
+                messages: outgoing,
                 stream: true,
                 // An empty list is not the same as no list: Ollama rejects a
                 // request that offers tools to a model without the capability.
-                tools: (native && !schemas.is_empty()).then(|| schemas.clone()),
+                tools: (step_native.load(Ordering::Relaxed) && !schemas.is_empty()).then(|| schemas.clone()),
                 think: self.config.think,
                 format: None,
                 options: Some(Options {
@@ -327,6 +346,7 @@ impl AgentRunner {
                     // something real rather than by a guess. See
                     // `ollama::reply_budget`.
                     num_predict: Some(reply_budget(self.config.num_ctx) as i32),
+                    temperature: plan.temperature,
                     ..Default::default()
                 }),
                 keep_alive: Some(self.config.keep_alive.clone()),
@@ -389,12 +409,32 @@ impl AgentRunner {
                     let _ = events.send(AgentEvent::Error { message: message.into() }).await;
                     continue;
                 }
+                // The model wrote a native tool call Ollama itself could not
+                // parse. That is a model slip, not a dead daemon: tell the
+                // model what was wrong and retry, then fall back to text mode.
+                Err(e) if tool_parse_failure(&e).is_some()
+                    && parse_retry_plan(parse_failures_in_row + 1).retry =>
+                {
+                    parse_failures_in_row += 1;
+                    let detail = tool_parse_failure(&e).unwrap_or_default();
+                    messages.push(Message::user(&parse_failure_note(&detail, &schemas)));
+                    let _ = events
+                        .send(AgentEvent::Error {
+                            message: format!(
+                                "The model's tool call was not valid JSON. Asking it to try again \
+                                 ({parse_failures_in_row}/{MAX_PARSE_RETRIES})."
+                            ),
+                        })
+                        .await;
+                    continue;
+                }
                 Err(e) => {
                     let _ = events.send(AgentEvent::Error { message: e.to_string() }).await;
                     let _ = events.send(AgentEvent::Done { reason: StopReason::Failed }).await;
                     return StopReason::Failed;
                 }
             };
+            parse_failures_in_row = 0;
 
             // Any response at all counts, including a reply truncated at the
             // length cap: the daemon answered, so the previous stall was not
@@ -459,7 +499,7 @@ impl AgentRunner {
 
             // Record what the model said with the call syntax stripped out, so
             // the transcript does not carry raw JSON as if it were prose.
-            messages.push(if native {
+            messages.push(if step_native.load(Ordering::Relaxed) {
                 Message {
                     role: "assistant".into(),
                     content: found.residual_text.clone(),
@@ -700,6 +740,91 @@ fn call_signature(name: &str, args: &Map<String, Value>) -> String {
     // the same call written two ways still counts as a repeat.
     let ordered: std::collections::BTreeMap<_, _> = args.iter().collect();
     format!("{name}::{}", serde_json::to_string(&ordered).unwrap_or_default())
+}
+
+/// Retries allowed after Ollama rejects a native tool call as unparseable.
+const MAX_PARSE_RETRIES: usize = 3;
+
+/// What to do on the next request, given how many parse failures came in a row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ParseRetry {
+    /// Whether another attempt is allowed at all.
+    retry: bool,
+    /// Sampling temperature for the attempt; lower means fewer malformed calls.
+    temperature: Option<f32>,
+    /// Drop native schemas for the attempt and use text-mode tool calls.
+    text_fallback: bool,
+}
+
+fn parse_retry_plan(failures: usize) -> ParseRetry {
+    match failures {
+        0 => ParseRetry { retry: true, temperature: None, text_fallback: false },
+        1 => ParseRetry { retry: true, temperature: Some(0.2), text_fallback: false },
+        n if n <= MAX_PARSE_RETRIES => {
+            ParseRetry { retry: true, temperature: Some(0.1), text_fallback: true }
+        }
+        _ => ParseRetry { retry: false, temperature: None, text_fallback: false },
+    }
+}
+
+/// The error text, when a daemon error is Ollama failing to parse the
+/// model's own tool call (as opposed to a real server failure).
+fn tool_parse_failure(err: &crate::ollama::OllamaError) -> Option<String> {
+    let crate::ollama::OllamaError::Status { status, body } = err else {
+        return None;
+    };
+    if *status < 400 {
+        return None;
+    }
+    let lower = body.to_lowercase();
+    let is_parse = lower.contains("error parsing tool call")
+        || lower.contains("failed to parse tool call")
+        || (lower.contains("tool call")
+            && ["invalid character", "unexpected end of json", "cannot unmarshal", "parse"]
+                .iter()
+                .any(|m| lower.contains(m)));
+    if !is_parse {
+        return None;
+    }
+    // Prefer the inner `error` string of a JSON body.
+    let inner = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| body.clone());
+    Some(inner.chars().take(300).collect())
+}
+
+/// Corrective note after a rejected tool call. Names the tool whose
+/// parameters best match the broken arguments, if any, with its signature.
+fn parse_failure_note(detail: &str, schemas: &[Tool]) -> String {
+    let best = schemas
+        .iter()
+        .map(|t| {
+            let hits = t
+                .function
+                .parameters
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|p| p.keys().filter(|k| detail.contains(&format!("\"{k}\""))).count())
+                .unwrap_or(0);
+            (hits, t)
+        })
+        .filter(|(hits, _)| *hits > 0)
+        .max_by_key(|(hits, _)| *hits)
+        .map(|(_, t)| t);
+    let hint = match best {
+        Some(t) => format!(
+            " Expected: {}({}).",
+            t.function.name,
+            crate::mcp::schema::signature(&t.function.parameters)
+        ),
+        None => " Use only the tool names and arguments you were given.".to_string(),
+    };
+    format!(
+        "Your last tool call was not valid JSON: {detail}. Call the tool again with a single \
+         valid JSON object matching its schema: double-quoted keys and strings, no comments, \
+         no trailing commas.{hint}"
+    )
 }
 
 /// The message that ends a run caught repeating itself.
@@ -985,6 +1110,43 @@ mod tests {
         let before = schema_tokens(&shown);
         expose(&mut shown, &registry(), "mcp__srv__set_effect_param", PromptTier::Compact);
         assert!(schema_tokens(&shown) > before);
+    }
+
+    fn status(body: &str) -> crate::ollama::OllamaError {
+        crate::ollama::OllamaError::Status { status: 500, body: body.into() }
+    }
+
+    #[test]
+    fn a_tool_call_parse_error_is_classified_as_recoverable() {
+        let body = r#"{"error":"error parsing tool call: raw='{\"effectId\":\"x\",\"i\"}', err=invalid character '}' after object key"}"#;
+        let detail = tool_parse_failure(&status(body)).expect("recoverable");
+        assert!(detail.starts_with("error parsing tool call"), "{detail}");
+    }
+
+    #[test]
+    fn other_server_errors_stay_fatal() {
+        assert!(tool_parse_failure(&status(r#"{"error":"model not found"}"#)).is_none());
+        assert!(tool_parse_failure(&status(r#"{"error":"no user query found in messages"}"#)).is_none());
+        assert!(tool_parse_failure(&crate::ollama::OllamaError::Cancelled).is_none());
+    }
+
+    #[test]
+    fn retries_cool_down_then_fall_back_to_text_then_stop() {
+        assert!(!parse_retry_plan(0).text_fallback && parse_retry_plan(0).temperature.is_none());
+        assert_eq!(parse_retry_plan(1).temperature, Some(0.2));
+        assert!(!parse_retry_plan(1).text_fallback);
+        assert!(parse_retry_plan(2).text_fallback && parse_retry_plan(MAX_PARSE_RETRIES).text_fallback);
+        assert!(parse_retry_plan(MAX_PARSE_RETRIES).retry);
+        assert!(!parse_retry_plan(MAX_PARSE_RETRIES + 1).retry);
+    }
+
+    #[test]
+    fn the_note_names_the_tool_whose_params_match_the_broken_call() {
+        let all = registry();
+        let note = parse_failure_note(r#"raw='{"effect":"chroma","value"}'"#, &all);
+        assert!(note.contains("mcp__srv__set_effect_param(effect: string*, value: number*)"), "{note}");
+        let plain = parse_failure_note("raw='{oops'", &all);
+        assert!(plain.contains("Use only the tool names"), "{plain}");
     }
 
     #[test]
