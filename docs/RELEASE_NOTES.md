@@ -1,3 +1,24 @@
+# v0.2.9 - long runs no longer lose the question
+
+On a small context window with an MCP server connected, a run could stop with
+`Ollama returned 500: {"error":"no user query found in messages"}`. The
+request had outgrown the window, and Ollama cut it from the front, taking the
+user's instruction with it.
+
+## What changed
+
+- Tool schemas sent to the model now count against the window when the
+  conversation is trimmed. Before, they were left out, and with many MCP
+  tools on an 8K window they took a large share of it.
+- When dropping older steps is not enough, the longest messages are shortened,
+  each with a note saying how much was left out. The system prompt and the
+  current instruction are never shortened.
+- This applies to every model, MCP server and tool.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled. MCP servers started through `npx` need Node.js.
 # v0.2.8 - crashes are caught and logged
 
 The app could vanish mid-use with no message. The release build aborted on any
