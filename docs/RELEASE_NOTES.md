@@ -1,3 +1,34 @@
+# v0.3.0 - small models find and call MCP tools reliably
+
+Small local models struggled with MCP servers that offer many tools. Only the
+first few tools a server listed were shown, a wrong tool name came back as a
+bare "unknown tool", and one malformed tool call from the model ended the run.
+
+## The model sees the tools it needs
+
+- How many tools are shown now depends on the context window. When every
+  schema fits, every tool is shown. When they don't, a minimum set is kept and
+  the remaining room goes to the tools most relevant to the request.
+- When some tools are hidden, the model gets `find_tools` to search the rest
+  and make them callable.
+- Calling a real tool that was hidden simply runs it, with the usual
+  permission checks.
+
+## Mistakes lead somewhere
+
+- An unknown tool name returns the five closest real tools with their
+  signatures. Missing arguments return the tool's real schema.
+- Repeating the same failing call gets a nudge, and a loop is stopped.
+- When Ollama rejects a tool call as invalid JSON, the run retries instead of
+  failing: first with a lower temperature, then with text-mode tool calls for
+  that step.
+
+All of this applies to every model, MCP server and tool.
+
+## Install
+
+Windows: `.msi` or `.exe` below. Needs [Ollama](https://ollama.com) running with
+at least one model pulled. MCP servers started through `npx` need Node.js.
 # v0.2.9 - long runs no longer lose the question
 
 On a small context window with an MCP server connected, a run could stop with
