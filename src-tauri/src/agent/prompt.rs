@@ -147,6 +147,68 @@ const PRIORITY_TOOLS: &[&str] = &[
 /// it by mistake — and a tool the model never needed still costs prefill on
 /// every single step.
 pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
+    select_ranked(tools, tier, "")
+}
+
+/// Share of the context window that tool schemas may take.
+///
+/// The conversation is trimmed to [`crate::agent::context`]'s 65 % occupancy
+/// *after* the schemas come off the top, so this leaves the conversation at
+/// least a third of the window. On an 8K window that is ~2,400 tokens of
+/// schemas; on 32K nearly ten thousand, which holds every tool most setups have.
+pub const SCHEMA_SHARE: f64 = 0.30;
+
+/// Token cost of one schema as it will actually be sent.
+pub fn schema_cost(tool: &Tool, tier: PromptTier) -> usize {
+    let compact = compact_tools(std::slice::from_ref(tool), tier);
+    estimate_tokens(&serde_json::to_string(&compact[0]).unwrap_or_default())
+}
+
+/// Pick the tools to expose, sized by the context window rather than a fixed count.
+///
+/// - Everything, when every schema fits in `schema_tokens`. A model that can
+///   see the whole surface never has to guess a name.
+/// - Otherwise the tier's selection ([`select_ranked`]) is the floor, so a
+///   small model always keeps a usable set, and the rest of the room is filled
+///   with the tools most relevant to `query`, best first, as long as they fit.
+///
+/// `schema_tokens` is `None` when the window size is unknown; the floor alone
+/// is used then, which is the old fixed-budget behaviour with relevance ranking.
+pub fn select_tools_for(
+    tools: &[Tool],
+    tier: PromptTier,
+    query: &str,
+    schema_tokens: Option<usize>,
+) -> Vec<Tool> {
+    let floor = select_ranked(tools, tier, query);
+    let Some(room) = schema_tokens else {
+        return floor;
+    };
+    let costs: Vec<usize> = tools.iter().map(|t| schema_cost(t, tier)).collect();
+    if costs.iter().sum::<usize>() <= room {
+        return tools.to_vec();
+    }
+
+    let mut used: usize = floor.iter().map(|t| schema_cost(t, tier)).sum();
+    let mut chosen = floor;
+    let rest: Vec<&Tool> = tools
+        .iter()
+        .filter(|t| !chosen.iter().any(|c| c.function.name == t.function.name))
+        .collect();
+    for tool in crate::agent::toolsearch::rank_by_relevance(&rest, query) {
+        let cost = schema_cost(tool, tier);
+        if used + cost <= room {
+            used += cost;
+            chosen.push(tool.clone());
+        }
+    }
+    chosen
+}
+
+/// [`select_tools`], with MCP tools ranked by relevance to `query` instead of
+/// taken in server order. The cut used to keep whichever tools a server listed
+/// first, so the one a task needed could be hidden behind ten it did not.
+pub fn select_ranked(tools: &[Tool], tier: PromptTier, query: &str) -> Vec<Tool> {
     let mcp_reserved = tools.iter().filter(|t| is_mcp(t)).count().min(tier.mcp_budget());
     let budget = tier.tool_budget().saturating_add(mcp_reserved);
     if tools.len() <= budget && tools.iter().filter(|t| is_mcp(t)).count() <= tier.mcp_budget() {
@@ -166,8 +228,9 @@ pub fn select_tools(tools: &[Tool], tier: PromptTier) -> Vec<Tool> {
     for name in CORE_TOOLS {
         take(name, &mut chosen);
     }
-    // MCP tools next, in server order, up to their own reservation.
-    for tool in tools.iter().filter(|t| is_mcp(t)).take(mcp_reserved) {
+    // MCP tools next, most relevant first, up to their own reservation.
+    let mcp: Vec<&Tool> = tools.iter().filter(|t| is_mcp(t)).collect();
+    for tool in crate::agent::toolsearch::rank_by_relevance(&mcp, query).into_iter().take(mcp_reserved) {
         take(&tool.function.name, &mut chosen);
     }
     for name in PRIORITY_TOOLS {
@@ -557,6 +620,66 @@ mod tests {
         let chosen = select_tools(&all, PromptTier::Full);
         let mcp = chosen.iter().filter(|t| t.function.name.starts_with("mcp__")).count();
         assert_eq!(mcp, PromptTier::Full.mcp_budget());
+    }
+
+    fn mcp_surface() -> Vec<Tool> {
+        let mut all: Vec<Tool> = CORE_TOOLS.iter().map(|n| mcp_named(n)).collect();
+        all.extend((0..30).map(|i| mcp_named(&format!("mcp__srv__misc_{i}"))));
+        all.push(Tool::function(
+            "mcp__srv__set_effect_param",
+            "Change a post effect parameter such as chroma.",
+            json!({"type": "object", "properties": {"value": {"type": "number"}}}),
+        ));
+        all
+    }
+
+    #[test]
+    fn all_tools_are_shown_when_they_fit() {
+        let all = mcp_surface();
+        for tier in [PromptTier::Minimal, PromptTier::Compact, PromptTier::Full] {
+            let chosen = select_tools_for(&all, tier, "anything", Some(1_000_000));
+            assert_eq!(chosen.len(), all.len(), "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn relevance_picks_the_relevant_tool_when_they_do_not_fit() {
+        let all = mcp_surface();
+        // Room for nothing beyond the floor: the floor itself must hold it.
+        let chosen = select_tools_for(&all, PromptTier::Compact, "increase chroma effect", Some(0));
+        assert!(chosen.iter().any(|t| t.function.name == "mcp__srv__set_effect_param"));
+        assert_eq!(chosen.len(), select_ranked(&all, PromptTier::Compact, "").len(), "floor only");
+        for core in CORE_TOOLS {
+            assert!(chosen.iter().any(|t| t.function.name == *core));
+        }
+    }
+
+    #[test]
+    fn spare_room_is_filled_up_to_the_budget() {
+        let all = mcp_surface();
+        let floor = select_ranked(&all, PromptTier::Compact, "");
+        let floor_cost: usize = floor.iter().map(|t| schema_cost(t, PromptTier::Compact)).sum();
+        let one = schema_cost(&all[10], PromptTier::Compact);
+        let chosen = select_tools_for(&all, PromptTier::Compact, "", Some(floor_cost + one * 5));
+        assert!(chosen.len() >= floor.len() + 4 && chosen.len() < all.len(), "{}", chosen.len());
+        let cost: usize = chosen.iter().map(|t| schema_cost(t, PromptTier::Compact)).sum();
+        assert!(cost <= floor_cost + one * 5);
+    }
+
+    #[test]
+    fn unknown_window_falls_back_to_the_tier_floor() {
+        let all = mcp_surface();
+        let chosen = select_tools_for(&all, PromptTier::Minimal, "", None);
+        assert_eq!(chosen.len(), PromptTier::Minimal.tool_budget() + PromptTier::Minimal.mcp_budget());
+    }
+
+    #[test]
+    fn text_mode_lists_every_tools_own_params() {
+        let a = Tool::function("mcp__s__get", "Read.", json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}));
+        let b = Tool::function("mcp__s__set", "Write.", json!({"type": "object", "properties": {"path": {"type": "string"}, "value": {}}, "required": ["path", "value"]}));
+        let text = text_tool_instructions(&compact_tools(&[a, b], PromptTier::Minimal));
+        assert!(text.contains("- mcp__s__get(path: string*)"), "{text}");
+        assert!(text.contains("- mcp__s__set(path: string*, value: any*)"), "{text}");
     }
 
     #[test]

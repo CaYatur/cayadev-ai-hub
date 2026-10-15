@@ -5,6 +5,7 @@ pub mod context;
 pub mod prompt;
 pub mod runner;
 pub mod toolcall;
+pub mod toolsearch;
 
 pub use context::{fit, total_tokens};
 pub use approver::{ApprovalFacts, AssistedGate, ModelOracle, RiskOracle, Verdict};

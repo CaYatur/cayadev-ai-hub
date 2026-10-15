@@ -28,7 +28,10 @@ use crate::ollama::types::{ChatRequest, Message, Metrics, Options, Tool};
 use crate::perms::{Action, Decision, Evaluation, Outcome, PermissionEngine};
 
 use super::context;
-use super::prompt::{compact_tools, select_tools, system_prompt, text_tool_instructions, PromptTier};
+use super::prompt::{
+    compact_tools, select_tools_for, system_prompt, text_tool_instructions, PromptTier, SCHEMA_SHARE,
+};
+use super::toolsearch::{self, find_tools_schema, FIND_TOOLS};
 use super::toolcall::{extract, unknown_tool_name, Recovery};
 
 /// Executes tool calls. Implemented by the real tool surface and by test doubles.
@@ -235,12 +238,24 @@ impl AgentRunner {
 
         let tier = PromptTier::for_params(self.config.params_billions);
         // Trim to what this model can choose between, then shorten what is left.
-        let schemas = if self.config.tools_enabled {
-            compact_tools(&select_tools(&tools.schemas(), tier), tier)
-        } else {
-            Vec::new()
-        };
-        let known: Vec<String> = schemas.iter().map(|t| t.function.name.clone()).collect();
+        //
+        // How many tools fit is decided by the window, not a fixed count: all
+        // of them when their schemas fit, otherwise the tier's floor plus the
+        // ones most relevant to this instruction. Whatever is left out stays
+        // reachable through `find_tools`, and by calling it by name.
+        let all_tools: Vec<Tool> = if self.config.tools_enabled { tools.schemas() } else { Vec::new() };
+        let schema_room = self.config.num_ctx.map(|n| (n as f64 * SCHEMA_SHARE) as usize);
+        let mut schemas =
+            compact_tools(&select_tools_for(&all_tools, tier, user_message, schema_room), tier);
+        if schemas.len() < all_tools.len() {
+            schemas.push(find_tools_schema());
+        }
+        // Names are resolved against the whole registry, so a call to a tool
+        // that exists but was not shown still parses and can be run.
+        let mut known: Vec<String> = all_tools.iter().map(|t| t.function.name.clone()).collect();
+        if schemas.iter().any(|t| t.function.name == FIND_TOOLS) {
+            known.push(FIND_TOOLS.to_string());
+        }
 
         tools.set_progress(progress_tx);
 
@@ -271,14 +286,8 @@ impl AgentRunner {
         let mut task = messages.len() - 1;
 
         // Native tool schemas ride beside the messages and use the same window.
-        let reserved: usize = if native {
-            schemas
-                .iter()
-                .map(|t| crate::agent::prompt::estimate_tokens(&serde_json::to_string(t).unwrap_or_default()))
-                .sum()
-        } else {
-            0
-        };
+        // Recomputed whenever a tool is exposed mid-run.
+        let mut reserved: usize = if native { schema_tokens(&schemas) } else { 0 };
         let mut repeats = Repetition::default();
         // Retries count consecutively, not per run. Two stalls in a row is a
         // real failure; a stall at step five and another at step seventy are
@@ -425,11 +434,7 @@ impl AgentRunner {
                 // mistake to correct, not an answer. Treating it as an answer
                 // is how a session ends having done nothing.
                 if let Some(invented) = unknown_tool_name(&assistant.content) {
-                    let msg = format!(
-                        "There is no tool called `{invented}`. The tools you can use are: \
-                         {}. Call one of those, or answer without a tool.",
-                        known.join(", ")
-                    );
+                    let msg = toolsearch::unknown_tool_message(&all_tools, &invented);
                     messages.push(Message {
                         role: "assistant".into(),
                         content: assistant.content.clone(),
@@ -474,6 +479,36 @@ impl AgentRunner {
                 let name = call.function.name.clone();
                 let mut args = call.function.arguments_object();
 
+                // --- Guard 0: tool discovery and name resolution ------------
+                // `find_tools` is answered here, from the full registry. A tool
+                // that exists but was not shown is exposed and run as normal
+                // (permissions still apply). A name that exists nowhere gets the
+                // nearest real tools instead of a bare "unknown tool".
+                let early = if name == FIND_TOOLS {
+                    let query = args.get("query").and_then(Value::as_str).unwrap_or_default();
+                    Some((find_tools_result(&mut schemas, &all_tools, query, tier), Outcome::AutoApproved))
+                } else if expose(&mut schemas, &all_tools, &name, tier) {
+                    None
+                } else {
+                    Some((toolsearch::unknown_tool_message(&all_tools, &name), Outcome::Failed))
+                };
+                if native {
+                    reserved = schema_tokens(&schemas);
+                }
+                if let Some((msg, outcome)) = early {
+                    let seen = repeats.record(&call_signature(&name, &args));
+                    if seen > self.config.loop_threshold {
+                        messages.push(result_message(&name, &repeat_stop(&name, seen)));
+                        let _ = events.send(AgentEvent::Done { reason: StopReason::LoopDetected }).await;
+                        return StopReason::LoopDetected;
+                    }
+                    messages.push(result_message(&name, &msg));
+                    let _ = events
+                        .send(AgentEvent::ToolSettled { id: String::new(), outcome, output: msg })
+                        .await;
+                    continue;
+                }
+
                 // --- Guard 1: arguments against the schema ------------------
                 // Required arguments first, with the message small models have
                 // been measured against; then types, enums and unknown keys,
@@ -482,11 +517,22 @@ impl AgentRunner {
                     .map(|missing| {
                         format!(
                             "Error: `{name}` requires the argument `{missing}`, which was not \
-                             provided. Call it again with `{missing}` set."
+                             provided. Call it again with `{missing}` set. Expected: {}",
+                            expected(&schemas, &name)
                         )
                     })
                     .or_else(|| invalid_arguments(&schemas, &name, &mut args));
-                if let Some(msg) = invalid {
+                if let Some(mut msg) = invalid {
+                    // The same broken call again is a model not reading the error.
+                    let seen = repeats.record(&call_signature(&name, &args));
+                    if seen > self.config.loop_threshold {
+                        messages.push(result_message(&name, &repeat_stop(&name, seen)));
+                        let _ = events.send(AgentEvent::Done { reason: StopReason::LoopDetected }).await;
+                        return StopReason::LoopDetected;
+                    }
+                    if seen > 1 {
+                        msg.push_str(" This exact call already failed; do not repeat it unchanged.");
+                    }
                     messages.push(result_message(&name, &msg));
                     let _ = events
                         .send(AgentEvent::ToolSettled {
@@ -502,12 +548,7 @@ impl AgentRunner {
                 let signature = call_signature(&name, &args);
                 let seen = repeats.record(&signature);
                 if seen > self.config.loop_threshold {
-                    let msg = format!(
-                        "You have called `{name}` with identical arguments {seen} times and \
-                         nothing has changed in between. The result will not change either. \
-                         Use the result you already have, or answer without calling a tool."
-                    );
-                    messages.push(result_message(&name, &msg));
+                    messages.push(result_message(&name, &repeat_stop(&name, seen)));
                     let _ = events
                         .send(AgentEvent::Done { reason: StopReason::LoopDetected })
                         .await;
@@ -659,6 +700,66 @@ fn call_signature(name: &str, args: &Map<String, Value>) -> String {
     // the same call written two ways still counts as a repeat.
     let ordered: std::collections::BTreeMap<_, _> = args.iter().collect();
     format!("{name}::{}", serde_json::to_string(&ordered).unwrap_or_default())
+}
+
+/// The message that ends a run caught repeating itself.
+fn repeat_stop(name: &str, seen: usize) -> String {
+    format!(
+        "You have called `{name}` with identical arguments {seen} times and nothing has \
+         changed in between. The result will not change either. Use the result you already \
+         have, or answer without calling a tool."
+    )
+}
+
+/// Token cost of native schemas, which share the window with the messages.
+fn schema_tokens(schemas: &[Tool]) -> usize {
+    schemas
+        .iter()
+        .map(|t| crate::agent::prompt::estimate_tokens(&serde_json::to_string(t).unwrap_or_default()))
+        .sum()
+}
+
+/// `name(signature)` for a tool, as shown in error messages.
+fn expected(schemas: &[Tool], name: &str) -> String {
+    schemas
+        .iter()
+        .find(|t| t.function.name == name)
+        .map(|t| format!("{name}({}).", crate::mcp::schema::signature(&t.function.parameters)))
+        .unwrap_or_default()
+}
+
+/// Make `name` callable if it exists in the registry. `false` when it does not
+/// exist anywhere.
+fn expose(schemas: &mut Vec<Tool>, all: &[Tool], name: &str, tier: PromptTier) -> bool {
+    if schemas.iter().any(|t| t.function.name == name) {
+        return true;
+    }
+    match all.iter().find(|t| t.function.name == name) {
+        Some(tool) => {
+            schemas.extend(compact_tools(std::slice::from_ref(tool), tier));
+            true
+        }
+        None => false,
+    }
+}
+
+/// Answer a `find_tools` call and expose what it found.
+fn find_tools_result(schemas: &mut Vec<Tool>, all: &[Tool], query: &str, tier: PromptTier) -> String {
+    let hits = toolsearch::search(all, query, 8);
+    if hits.is_empty() {
+        return format!(
+            "No tools match `{query}`. Try different or fewer keywords (English tool \
+             names usually work best), or answer without a tool."
+        );
+    }
+    let lines: Vec<String> = hits.iter().map(|t| toolsearch::one_line(t)).collect();
+    for hit in hits {
+        expose(schemas, all, &hit.function.name, tier);
+    }
+    format!(
+        "Matching tools, now callable (arguments marked * are required):\n{}",
+        lines.join("\n")
+    )
 }
 
 /// First required argument the call omitted, if any.
@@ -832,6 +933,58 @@ mod tests {
         let mut slip = args(json!({"n": "7"}));
         assert_eq!(invalid_arguments(&schemas, "mcp__x__count", &mut slip), None);
         assert_eq!(slip["n"], json!(7), "a harmless slip is repaired in place");
+    }
+
+    fn registry() -> Vec<Tool> {
+        let mut all = schema();
+        all.push(Tool::function(
+            "mcp__srv__set_effect_param",
+            "Change a post effect parameter such as chroma.",
+            json!({"type": "object", "properties": {"effect": {"type": "string"}, "value": {"type": "number"}}, "required": ["effect", "value"]}),
+        ));
+        all
+    }
+
+    #[test]
+    fn a_hidden_but_real_tool_is_exposed_on_call() {
+        let all = registry();
+        let mut shown = schema();
+        assert!(expose(&mut shown, &all, "mcp__srv__set_effect_param", PromptTier::Compact));
+        assert_eq!(shown.len(), 2);
+        // Exposing twice does not duplicate it.
+        assert!(expose(&mut shown, &all, "mcp__srv__set_effect_param", PromptTier::Compact));
+        assert_eq!(shown.len(), 2);
+    }
+
+    #[test]
+    fn an_invented_tool_is_not_exposed() {
+        let mut shown = schema();
+        assert!(!expose(&mut shown, &registry(), "mcp__srv__set_config", PromptTier::Compact));
+        assert_eq!(shown.len(), 1);
+    }
+
+    #[test]
+    fn find_tools_returns_signatures_and_exposes_matches() {
+        let all = registry();
+        let mut shown = schema();
+        let out = find_tools_result(&mut shown, &all, "chroma effect", PromptTier::Compact);
+        assert!(out.contains("mcp__srv__set_effect_param(effect: string*, value: number*)"), "{out}");
+        assert!(shown.iter().any(|t| t.function.name == "mcp__srv__set_effect_param"));
+        let none = find_tools_result(&mut shown, &all, "zzzz", PromptTier::Compact);
+        assert!(none.starts_with("No tools match"), "{none}");
+    }
+
+    #[test]
+    fn a_missing_argument_message_shows_the_real_schema() {
+        assert_eq!(expected(&schema(), "read_file"), "read_file(path: string*).");
+    }
+
+    #[test]
+    fn exposing_a_tool_grows_the_reserved_window() {
+        let mut shown = schema();
+        let before = schema_tokens(&shown);
+        expose(&mut shown, &registry(), "mcp__srv__set_effect_param", PromptTier::Compact);
+        assert!(schema_tokens(&shown) > before);
     }
 
     #[test]
